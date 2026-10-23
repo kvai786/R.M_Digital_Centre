@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="description" content="Browser-only operations dashboard preview for R.M Digital Centre.">
+    <title>Operations preview | R.M Digital Centre</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body data-page="operations">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="navbar">
+        <a class="logo" href="index.html">R.M <span>Digital Centre</span></a>
+        <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="login.html">Partner login</a></nav>
+    </header>
+    <main id="main-content" class="dashboard-page">
+        <section id="dashboard-access-denied" class="form-card" hidden>
+            <p class="eyebrow">STAFF ACCESS REQUIRED</p>
+            <h1>Sign in to continue</h1>
+            <p class="form-intro">Access is limited to the Master Admin or an accepted Sub-Admin whose name and mobile still match the Master Admin whitelist.</p>
+            <a class="btn primary" href="login.html">Continue to secure login</a>
+        </section>
+        <div id="operations-content" hidden>
+        <div class="dashboard-heading">
+            <div><p class="eyebrow">OPERATIONS WORKSPACE PREVIEW</p><h1>Partner application workspace</h1><p>Authorized Master Admins and Sub-Admins can approve, request corrections, permanently block numbers, or delete application records.</p></div>
+            <span class="demo-badge">DEMO — NOT SECURE</span>
+        </div>
+        <div class="security-note dashboard-warning">Browser-only demonstration: credentials, whitelist entries, roles, sessions and application records can be edited or cleared by users; mobile numbers are not verified. Do not use real customer data.</div>
+        <section class="operator-controls" aria-labelledby="operator-title">
+            <div><h2 id="operator-title">Signed-in operator</h2><p id="operator-caption">Master Admin</p></div>
+            <div class="operator-hierarchy"><span>Master Admin</span><span aria-hidden="true">→</span><span>Sub-Admin / Operator</span></div>
+            <button type="button" class="btn quiet" id="staff-signout">Sign out</button>
+        </section>
+        <section class="dashboard-stats" aria-label="Application summary">
+            <article class="stat-card"><span>Pending applications</span><strong id="pending-count">0</strong></article>
+            <article class="stat-card"><span>Awaiting Master approval</span><strong id="approval-count">0</strong></article>
+        </section>
+        <section class="dashboard-section master-only" id="operator-enrollment-section" aria-labelledby="operator-enrollment-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">MASTER ADMIN CONTROL</p><h2 id="operator-enrollment-title">Sub-Admin enrollment requests</h2><p class="section-desc">Review every request. Accept only a name/mobile pair on your authorization whitelist; reject terminates that request.</p></div></div>
+            <div id="operator-request-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section master-only" id="operator-whitelist-section" aria-labelledby="operator-whitelist-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">AUTHORIZED IDENTITIES</p><h2 id="operator-whitelist-title">Sub-Admin access lifecycle</h2><p class="section-desc">Control each authorized identity. Hold pauses access; permanent ban blocks re-registration; reset/reactivate clears restrictions and forces fresh password setup; delete removes all records and allows a clean re-add.</p></div></div>
+            <form id="operator-whitelist-form" class="whitelist-form">
+                <div class="field"><label for="whitelist-name">Authorized Sub-Admin name</label><input id="whitelist-name" name="name" autocomplete="off" maxlength="80" required></div>
+                <div class="field"><label for="whitelist-mobile">Authorized mobile number</label><input id="whitelist-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10,15}" maxlength="15" required></div>
+                <button class="btn primary" type="submit">Add / re-add authorized identity</button>
+            </form>
+            <p class="form-status" id="whitelist-status" role="status" aria-live="polite" hidden></p>
+            <div id="operator-whitelist-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section master-only" id="distributor-mapping-section" aria-labelledby="distributor-mapping-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">DISTRIBUTOR TERRITORIES</p><h2 id="distributor-mapping-title">PIN code routing</h2><p class="section-desc">Assign each six-digit service PIN code to one approved Distributor. Retailer applications with matching PIN codes are sent only to that Distributor's queue. Queue access links and notifications in this browser demo are not a substitute for server authentication or SMS.</p></div></div>
+            <div id="distributor-mapping-list" class="application-list" aria-live="polite"></div>
+            <p class="form-status" id="distributor-mapping-status" role="status" aria-live="polite" hidden></p>
+        </section>
+        <section class="dashboard-section" aria-labelledby="applications-title">
+            <div class="section-heading"><div><p class="eyebrow">SHARED APPLICATION QUEUE</p><h2 id="applications-title">Retailer &amp; Distributor applications</h2><p class="section-desc">Block permanently prevents future submissions from that mobile. Delete removes only the selected application record. Rejection sends the applicant to the correction and re-upload flow.</p></div></div>
+            <p class="distributor-notification-status" id="distributor-notification-status" role="status" aria-live="polite" hidden></p>
+            <div id="application-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section" id="sensitive-section" aria-labelledby="sensitive-title">
+            <div class="section-heading"><div><p class="eyebrow">CONTROLLED ACTIONS</p><h2 id="sensitive-title">System settings &amp; sensitive changes</h2><p class="section-desc">Sub-Admins can request a critical change; only the Master Admin can review and approve it.</p></div></div>
+            <div class="sensitive-action">
+                <div><h3>Request a critical change</h3><p>Examples: system settings, role permissions or sensitive data changes.</p></div>
+                <button type="button" class="btn secondary" id="request-change">Request Master approval</button>
+            </div>
+            <div id="approval-list" class="approval-list" aria-live="polite"></div>
+        </section>
+        <section class="password-approval" id="approval-password-panel" aria-labelledby="approval-password-title" hidden>
+            <div><p class="eyebrow">OPERATOR ACTION CONFIRMATION</p><h2 id="approval-password-title">Confirm your password</h2><p id="approval-password-destination"></p></div>
+            <form id="approval-password-form">
+                <div class="field"><label for="approval-password">Account password</label><input id="approval-password" name="password" type="password" autocomplete="current-password" maxlength="128" required></div>
+                <button class="btn primary" id="confirm-application-action" type="submit">Confirm action</button>
+                <button class="btn quiet" type="button" id="cancel-approval-password">Cancel</button>
+            </form>
+        </section>
+        <p class="form-status dashboard-status" id="dashboard-status" role="status" aria-live="polite" hidden></p>
+        </div>
+    </main>
+    <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. Browser-only workflow demonstration.</p></footer>
+    <script src="app.js"></script>
+</body>
+</html>

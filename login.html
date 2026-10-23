@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="description" content="Sign in to your R.M Digital Centre partner account.">
+    <title>Portal login | R.M Digital Centre</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="navbar">
+        <a class="logo" href="index.html">R.M <span>Digital Centre</span></a>
+        <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="register.html">Apply to join</a></nav>
+    </header>
+    <main id="main-content" class="form-page">
+        <section class="form-card" aria-labelledby="page-title">
+            <p class="eyebrow">SECURE PORTAL</p>
+            <h1 id="page-title">Welcome back</h1>
+            <p class="form-intro">Enter your authorized staff mobile number to continue.</p>
+            <form id="portal-login-form" novalidate>
+                <div class="field"><label for="login-mobile">Mobile number</label><input id="login-mobile" name="mobile" type="tel" inputmode="numeric" autocomplete="tel" pattern="[0-9]{10,15}" maxlength="15" required></div>
+                <button class="btn primary form-submit" type="submit">Continue</button>
+            </form>
+            <form id="login-password-form" class="flow-step" hidden>
+                <p class="account-step-label" id="login-account-label"></p>
+                <div class="field" id="login-name-field" hidden><label for="login-name">Authorized Sub-Admin name</label><input id="login-name" name="name" autocomplete="name"></div>
+                <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
+                <button class="btn primary form-submit" type="submit">Sign in</button>
+                <button class="text-button" type="button" id="forgot-password">Forgot password?</button>
+                <button class="text-button" type="button" id="change-number">Use a different number</button>
+            </form>
+            <form id="first-time-setup-form" class="flow-step" hidden>
+                <h2 id="setup-title">Set up your password</h2>
+                <p class="form-intro">Choose a strong password and a recovery phrase. Keep the recovery phrase private; it is needed to reset this demo account.</p>
+                <div class="field" id="setup-name-field" hidden><label for="setup-name">Full name</label><input id="setup-name" name="name" autocomplete="name"></div>
+                <div class="field"><label for="setup-password">New password</label><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <div class="field"><label for="setup-password-confirm">Confirm password</label><input id="setup-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <div class="field"><label for="setup-recovery">Recovery phrase (12+ characters)</label><input id="setup-recovery" name="recovery" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
+                <div class="field"><label for="setup-recovery-confirm">Confirm recovery phrase</label><input id="setup-recovery-confirm" name="recoveryConfirm" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
+                <button class="btn primary form-submit" type="submit">Save password</button>
+            </form>
+            <form id="password-recovery-form" class="flow-step" hidden>
+                <h2>Reset password</h2>
+                <p class="form-intro">Confirm the authorized mobile number and the recovery phrase created during setup.</p>
+                <div class="field"><label for="recovery-mobile">Authorized mobile number</label><input id="recovery-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10,15}" maxlength="15" required></div>
+                <div class="field"><label for="recovery-phrase">Recovery phrase</label><input id="recovery-phrase" name="recovery" type="password" autocomplete="off" maxlength="256" required></div>
+                <div class="field"><label for="recovery-password">New password</label><input id="recovery-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <div class="field"><label for="recovery-password-confirm">Confirm new password</label><input id="recovery-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <button class="btn primary form-submit" type="submit">Reset password</button>
+                <button class="text-button" type="button" id="cancel-recovery">Return to login</button>
+            </form>
+            <form id="operator-setup-form" class="flow-step" hidden>
+                <h2>Request Sub-Admin setup</h2>
+                <p class="form-intro">The name and locked mobile must match an identity already authorized by the Master Admin. The Master Admin must accept the request before password setup is enabled.</p>
+                <div class="field"><label for="operator-name">Full name</label><input id="operator-name" name="name" autocomplete="name" required></div>
+                <div class="field"><label for="operator-mobile">Operator mobile number</label><input id="operator-mobile" name="mobile" type="tel" readonly></div>
+                <button class="btn primary form-submit" type="submit">Request Master approval</button>
+            </form>
+            <p class="form-status" id="login-status" role="status" aria-live="polite" hidden></p>
+            <p class="security-note">Browser-only demonstration: passwords are hashed, but local storage and whitelist records can be edited and mobile numbers are not verified. Use server-side authentication and a verified recovery channel before production.</p>
+            <p class="form-note">Not a partner yet? <a href="register.html">Apply for a Retailer or Distributor ID</a>.</p>
+        </section>
+    </main>
+    <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. All rights reserved.</p></footer>
+    <script src="app.js"></script>
+</body>
+</html>

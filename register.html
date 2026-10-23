@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="description" content="Apply to become an R.M Digital Centre retailer or distributor.">
+    <title>Partner application | R.M Digital Centre</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="partner-page">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="navbar">
+        <a class="logo" href="index.html">R.M <span>Digital Centre</span></a>
+        <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="login.html">Portal login</a></nav>
+    </header>
+    <main id="main-content" class="form-page">
+        <section class="form-card form-card-wide" aria-labelledby="page-title">
+            <p class="eyebrow">PARTNER APPLICATION</p>
+            <h1 id="page-title">Apply to join our network</h1>
+            <p class="form-intro">Choose an application type and provide the required details. Document images can be scanned by the optional OCR service running on your own computer; document files are not attached to the demo application.</p>
+            <p class="security-note">Demo only — do not enter real personal information or select real identity documents. OCR only extracts text; it does not verify document authenticity. Extracted text is displayed temporarily and is not saved.</p>
+            <p class="form-note">Sub-Admin accounts are not created through partner registration. The Master Admin must first authorize the exact name and mobile number; authorized operators can request access from the <a href="login.html">Portal login</a> page.</p>
+
+            <div class="role-picker" role="tablist" aria-label="Choose partner application type">
+                <button class="role-choice" id="retailer-tab" type="button" role="tab" aria-controls="application-form" data-role-choice="retailer" aria-selected="true">
+                    <span class="role-choice-number">01</span><strong>New Retailer ID Apply</strong><span>Local customer service partner</span>
+                </button>
+                <button class="role-choice" id="distributor-tab" type="button" role="tab" aria-controls="application-form" data-role-choice="distributor" aria-selected="false">
+                    <span class="role-choice-number">02</span><strong>New Distributor ID Apply</strong><span>Retailer network partner</span>
+                </button>
+            </div>
+
+            <form id="application-form" class="partner-application-form" role="tabpanel" aria-labelledby="retailer-tab" novalidate>
+                <input type="hidden" name="role" id="application-role" value="retailer">
+                <section class="form-step-card" aria-labelledby="application-flow-title">
+                    <div class="form-step-heading"><span>STEP 01</span><div><h2 id="application-flow-title">Retailer application details</h2><p id="application-flow-description">Apply to provide local customer services as a Retailer partner.</p></div></div>
+                    <div class="form-grid">
+                        <div class="field"><label for="applicant-name">Full name <span class="required-mark" aria-hidden="true">*</span></label><input id="applicant-name" name="name" autocomplete="name" minlength="2" maxlength="80" required></div>
+                        <div class="field"><label for="applicant-mobile">10-digit mobile number <span class="required-mark" aria-hidden="true">*</span></label><input id="applicant-mobile" name="mobile" type="tel" inputmode="numeric" autocomplete="tel" pattern="[0-9]{10}" maxlength="10" minlength="10" title="Enter exactly 10 digits." required></div>
+                        <div class="field"><label for="business-name">Shop / business name <span class="required-mark" aria-hidden="true">*</span></label><input id="business-name" name="business" autocomplete="organization" minlength="2" maxlength="100" required></div>
+                        <div class="field"><label for="email">Email address <span class="required-mark" aria-hidden="true">*</span></label><input id="email" name="email" type="email" autocomplete="email" maxlength="254" required></div>
+                        <div class="field"><label for="address">Business address <span class="required-mark" aria-hidden="true">*</span></label><input id="address" name="address" autocomplete="street-address" minlength="5" maxlength="200" required></div>
+                        <div class="field"><label for="city">City / district <span class="required-mark" aria-hidden="true">*</span></label><input id="city" name="city" autocomplete="address-level2" minlength="2" maxlength="80" required></div>
+                        <div class="field" id="operational-pin-field"><label for="operational-pin">Operational PIN code <span class="required-mark" aria-hidden="true">*</span></label><input id="operational-pin" name="operationalPin" type="text" inputmode="numeric" autocomplete="postal-code" pattern="[0-9]{6}" maxlength="6" minlength="6" title="Enter the 6-digit PIN code for your service area." required><small class="field-hint">We use this PIN code to route your application to the mapped local Distributor.</small><small class="pin-route-status" id="pin-route-status" role="status" aria-live="polite"></small></div>
+                    </div>
+                </section>
+                <div class="document-block">
+                    <div class="form-step-heading"><span>STEP 02</span><div><h2>Identity &amp; business documents</h2><p>Identity, address and business proofs are required for both partner types. PDF, JPG or PNG.</p></div></div>
+                    <div class="form-grid">
+                        <div class="field"><label for="retailer-id-doc">Identity proof <span class="required-mark" aria-hidden="true">*</span></label><input id="retailer-id-doc" name="retailerIdentity" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></div>
+                        <div class="field"><label for="retailer-address-doc">Address proof <span class="required-mark" aria-hidden="true">*</span></label><input id="retailer-address-doc" name="retailerAddressProof" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></div>
+                        <div class="field"><label for="retailer-shop-doc">Shop / business proof <span class="required-mark" aria-hidden="true">*</span></label><input id="retailer-shop-doc" name="retailerBusinessProof" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></div>
+                    </div>
+                </div>
+                <div class="document-block" id="distributor-documents" hidden>
+                    <div class="form-step-heading"><span>STEP 03</span><div><h2>Distributor verification</h2><p>Additional business documents are required for distributor applications.</p></div></div>
+                    <div class="form-grid">
+                        <div class="field"><label for="business-registration">Business registration / GST proof <span class="required-mark" aria-hidden="true">*</span></label><input id="business-registration" name="businessRegistration" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" disabled></div>
+                        <div class="field"><label for="bank-proof">Bank proof / cancelled cheque <span class="required-mark" aria-hidden="true">*</span></label><input id="bank-proof" name="bankProof" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" disabled></div>
+                        <div class="field"><label for="office-proof">Office premises proof <span class="required-mark" aria-hidden="true">*</span></label><input id="office-proof" name="officeProof" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" disabled></div>
+                    </div>
+                </div>
+                <label class="checkbox-field"><input type="checkbox" name="consent" required><span>I confirm this is a demo application and consent to the information being used for this browser-only preview. <span class="required-mark" aria-hidden="true">*</span></span></label>
+                <button class="btn primary form-submit" id="application-submit-button" type="submit">Submit Retailer application</button>
+                <p class="form-status" id="application-status" role="status" aria-live="polite" hidden></p>
+            </form>
+            <section class="application-lookup" aria-labelledby="application-lookup-title" hidden>
+                <h2 id="application-lookup-title">Correct a rejected application</h2>
+                <p>If you have an application reference, you can look it up directly. Existing correction requests are also checked when you submit a new application.</p>
+                <form id="rejected-lookup-form" class="lookup-form">
+                    <div class="field"><label for="rejected-reference">Application reference <span class="required-mark" aria-hidden="true">*</span></label><input id="rejected-reference" name="reference" autocomplete="off" required></div>
+                    <div class="field"><label for="rejected-mobile">Registered mobile number <span class="required-mark" aria-hidden="true">*</span></label><input id="rejected-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" minlength="10" title="Enter exactly 10 numeric digits." required></div>
+                    <button class="btn secondary" type="submit">Find application</button>
+                </form>
+                <div id="rejected-application-result" class="rejected-result" aria-live="polite" hidden></div>
+                <p class="form-status" id="rejected-lookup-status" role="status" aria-live="polite" hidden></p>
+                <section id="correction-workspace" class="correction-workspace" aria-labelledby="correction-title" hidden>
+                    <div class="correction-workspace-heading"><div><p class="eyebrow">CORRECTION REQUIRED</p><h3 id="correction-title">Update your application</h3></div><span class="status-pill pending">Resubmission needed</span></div>
+                    <p id="correction-reason" class="correction-reason"></p>
+                    <p class="correction-reference">Application reference: <strong id="correction-reference"></strong></p>
+                    <button type="button" class="text-button" id="start-new-application">Use a different application</button>
+                </section>
+            </section>
+            <section class="submission-success" id="submission-success" aria-live="polite" hidden>
+                <span class="success-icon" aria-hidden="true">✓</span>
+                <h2>Application submitted for approval</h2>
+                <p id="application-success-message">Your demo application is pending review. In a live service, processing typically takes 24–48 hours. You would receive an SMS after a decision.</p>
+                <p class="application-reference">Reference: <strong id="application-reference"></strong></p>
+                <a class="btn secondary" href="index.html">Return home</a>
+            </section>
+        </section>
+    </main>
+    <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. All rights reserved.</p></footer>
+    <script src="app.js"></script>
+</body>
+</html>
