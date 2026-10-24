@@ -1,6 +1,9 @@
 fastapi
 uvicorn[standard]
 python-multipart
+sqlalchemy>=2.0,<3
+psycopg[binary]>=3.2,<4
+cryptography>=44,<47
 easyocr
 opencv-python-headless
 numpy

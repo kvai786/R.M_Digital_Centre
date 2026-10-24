@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "rm-digital-centre-v9";
+const CACHE_NAME = "rm-digital-centre-v12";
 const APP_SHELL = [
     "./",
     "./index.html",
@@ -36,6 +36,9 @@ self.addEventListener("activate", function (event) {
 
 self.addEventListener("fetch", function (event) {
     if (event.request.method !== "GET" || new URL(event.request.url).origin !== self.location.origin) {
+        return;
+    }
+    if (new URL(event.request.url).pathname.startsWith("/api/")) {
         return;
     }
     if (event.request.destination === "video" || event.request.headers.has("range")) {

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+rm_digital_centre.db
+*.sqlite
+*.sqlite3
+private_documents/

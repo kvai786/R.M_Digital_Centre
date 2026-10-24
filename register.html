@@ -23,8 +23,8 @@
         <section class="form-card form-card-wide" aria-labelledby="page-title">
             <p class="eyebrow">PARTNER APPLICATION</p>
             <h1 id="page-title">Apply to join our network</h1>
-            <p class="form-intro">Choose an application type and provide the required details. The optional document text scanner runs on your own computer. Selected document files are not uploaded or retained.</p>
-            <p class="data-handling-note">Application details are stored only in this browser and are not sent to our team. Do not enter real personal information or select real identity documents. Text scanning does not verify document authenticity.</p>
+            <p class="form-intro">Choose an application type, provide the required details, and upload your identity, address, and business documents. The optional document text scanner runs on your own computer.</p>
+            <p class="data-handling-note">Application details and selected documents are securely submitted for review and stored in private server storage. Only authenticated Master Admins can access uploaded files. Text scanning does not verify document authenticity.</p>
             <p class="form-note">Sub-Admin accounts are not created through partner registration. The Master Admin must first authorize the exact name and mobile number; authorized operators can request access from the <a href="login.html">Portal login</a> page.</p>
 
             <div class="role-picker" role="tablist" aria-label="Choose partner application type">
@@ -56,7 +56,7 @@
                     </div>
                 </section>
                 <div class="document-block">
-                    <div class="form-step-heading"><span>STEP 02</span><div><h2>Identity &amp; business documents</h2><p>Identity, address and business proofs are required for both partner types. PDF, JPG or PNG.</p></div></div>
+                    <div class="form-step-heading"><span>STEP 02</span><div><h2>Identity &amp; business documents</h2><p>Identity, address and business proofs are required for both partner types. PDF, JPG or PNG, up to 10 MB each.</p></div></div>
                     <div class="form-grid">
                         <div class="field"><label for="retailer-id-doc">Identity proof <span class="required-mark" aria-hidden="true">*</span></label><input id="retailer-id-doc" name="retailerIdentity" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></div>
                         <div class="field"><label for="retailer-address-doc">Address proof <span class="required-mark" aria-hidden="true">*</span></label><input id="retailer-address-doc" name="retailerAddressProof" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></div>
@@ -71,7 +71,7 @@
                         <div class="field"><label for="office-proof">Office premises proof <span class="required-mark" aria-hidden="true">*</span></label><input id="office-proof" name="officeProof" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" disabled></div>
                     </div>
                 </div>
-                <label class="checkbox-field"><input type="checkbox" name="consent" required><span>I understand that this application is stored only in this browser and is not sent to the R.M Digital Centre team. <span class="required-mark" aria-hidden="true">*</span></span></label>
+                <label class="checkbox-field"><input type="checkbox" name="consent" required><span>I consent to securely sending my application details and selected documents to R.M Digital Centre for partner review. <span class="required-mark" aria-hidden="true">*</span></span></label>
                 <button class="btn primary form-submit" id="application-submit-button" type="submit">Submit Retailer application</button>
                 <p class="form-status" id="application-status" role="status" aria-live="polite" hidden></p>
             </form>
@@ -95,7 +95,7 @@
             <section class="submission-success" id="submission-success" aria-live="polite" hidden>
                 <span class="success-icon" aria-hidden="true">✓</span>
                 <h2>Application submitted for approval</h2>
-                <p id="application-success-message">Your application details have been saved in this browser.</p>
+                <p id="application-success-message">Your application has been securely submitted for review.</p>
                 <p class="application-reference">Reference: <strong id="application-reference"></strong></p>
                 <a class="btn secondary" href="index.html">Return home</a>
             </section>

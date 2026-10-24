@@ -1,106 +1,1751 @@
-"""Local OCR endpoint for the R.M Digital Centre document text service."""
+"""R.M Digital Centre portal API and document OCR service."""
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from hashlib import scrypt, sha256
+from hmac import compare_digest
 from io import BytesIO
+import json
 import logging
-from typing import AsyncIterator
+import os
+from pathlib import Path
+from platform import system
+import re
+import secrets
+import threading
+from typing import Any, AsyncGenerator
+from urllib.parse import urlparse
+from uuid import uuid4
 
-import cv2
-import easyocr
-import numpy as np
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from PIL import Image, UnidentifiedImageError
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from cryptography.fernet import Fernet, InvalidToken
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.responses import StreamingResponse
 
+BASE_DIR = Path(__file__).resolve().parent
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+MAX_TOTAL_DOCUMENT_BYTES = 40 * 1024 * 1024
 MAX_IMAGE_DIMENSION = 8000
 MAX_IMAGE_PIXELS = 20_000_000
-ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png"}
-ALLOWED_ORIGINS = {"http://127.0.0.1:8000", "http://localhost:8000"}
+SESSION_LIFETIME = timedelta(hours=8)
+LOGIN_FAILURE_LIMIT = 10
+LOGIN_LOCK_TIME = timedelta(minutes=15)
+MASTER_ADMIN_MOBILE = os.getenv("MASTER_ADMIN_MOBILE", "8509010483")
+COOKIE_NAME = "rm_portal_session"
 LOGGER = logging.getLogger(__name__)
+UTC = timezone.utc
+STATE_KEYS = {
+    "rm-demo-applications", "rm-demo-blocked-partner-mobiles",
+    "rm-demo-distributor-pin-mappings", "rm-demo-distributor-notifications",
+    "rm-demo-sub-admins", "rm-demo-operator-requests",
+    "rm-demo-sub-admin-whitelist", "rm-demo-approvals",
+    "rm-demo-retail-profiles", "rm-demo-master-contact",
+    "rm-demo-upline-requests", "rm-demo-service-requests",
+}
+DOCUMENT_FIELDS = {
+    "retailerIdentity": "Identity proof",
+    "retailerAddressProof": "Address proof",
+    "retailerBusinessProof": "Shop / business proof",
+    "businessRegistration": "Business registration / GST proof",
+    "bankProof": "Bank proof / cancelled cheque",
+    "officeProof": "Office premises proof",
+}
+STATIC_FILES = {
+    "index.html", "login.html", "register.html", "admin.html", "retailer.html",
+    "styles.css", "app.js", "manifest.json", "sw.js", "icon.svg",
+    "icon-192.png", "icon-512.png",
+}
+APPLICATIONS_KEY = "rm-demo-applications"
+MASTER_ONLY_KEYS = STATE_KEYS - {
+    "rm-demo-applications", "rm-demo-blocked-partner-mobiles",
+    "rm-demo-distributor-notifications", "rm-demo-approvals",
+}
+COOKIE_SECURE = os.getenv("APP_ENV") == "production" or bool(os.getenv("RAILWAY_ENVIRONMENT"))
+OCR_LOCK = threading.Lock()
+_ocr_reader: Any = None
+
+
+def positive_integer_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be an integer.") from error
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}.")
+    return value
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def get_database_url() -> str:
+    value = os.getenv("DATABASE_URL", "sqlite:///./rm_digital_centre.db")
+    if value.startswith("postgres://"):
+        value = "postgresql+psycopg://" + value[len("postgres://"):]
+    elif value.startswith("postgresql://"):
+        value = "postgresql+psycopg://" + value[len("postgresql://"):]
+    if os.getenv("RAILWAY_ENVIRONMENT") and not value.startswith("postgresql+psycopg://"):
+        raise RuntimeError("Railway deployment requires a PostgreSQL DATABASE_URL.")
+    return value
+
+
+DB_URL = get_database_url()
+if DB_URL.startswith("sqlite"):
+    engine = create_engine(
+        DB_URL, connect_args={"check_same_thread": False}, pool_pre_ping=True,
+    )
+else:
+    engine = create_engine(
+        DB_URL,
+        pool_size=positive_integer_setting("DB_POOL_SIZE", 5, 1, 50),
+        max_overflow=positive_integer_setting("DB_MAX_OVERFLOW", 5, 0, 100),
+        pool_timeout=positive_integer_setting("DB_POOL_TIMEOUT_SECONDS", 30, 1, 300),
+        pool_recycle=positive_integer_setting("DB_POOL_RECYCLE_SECONDS", 1800, 60, 86400),
+        pool_pre_ping=True,
+    )
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def document_storage_dir() -> Path:
+    configured_path = os.getenv("UPLOAD_STORAGE_DIR")
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        if not configured_path:
+            raise RuntimeError("Railway deployment requires UPLOAD_STORAGE_DIR on a persistent volume.")
+        mount_path = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")).resolve()
+        if not mount_path.is_mount():
+            raise RuntimeError("The configured Railway upload mount is not mounted as a persistent volume.")
+        storage_path = Path(configured_path).resolve()
+        if storage_path != mount_path and mount_path not in storage_path.parents:
+            raise RuntimeError("UPLOAD_STORAGE_DIR must be inside the Railway persistent volume mount.")
+        return storage_path
+    return Path(configured_path or BASE_DIR / "private_documents").resolve()
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    mobile: Mapped[str] = mapped_column(String(15), unique=True, index=True)
+    retail_id: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    email: Mapped[str] = mapped_column(String(254), default="")
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    recovery_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    setup_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    setup_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PortalRecord(Base):
+    __tablename__ = "portal_records"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class Application(Base):
+    __tablename__ = "applications"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    mobile: Mapped[str] = mapped_column(String(15), index=True)
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    status: Mapped[str] = mapped_column(String(30), index=True)
+    distributor_application_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class CustomerDocument(Base):
+    __tablename__ = "customer_documents"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    application_id: Mapped[str] = mapped_column(
+        String(80), ForeignKey("applications.id", ondelete="CASCADE"), index=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    label: Mapped[str] = mapped_column(String(80))
+    original_filename: Mapped[str] = mapped_column(String(180))
+    content_type: Mapped[str] = mapped_column(String(40))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256_hex: Mapped[str] = mapped_column(String(64))
+    storage_key: Mapped[str] = mapped_column(String(80), unique=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class TransactionDocument(Base):
+    __tablename__ = "transaction_documents"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    transaction_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("transactions.id", ondelete="CASCADE"), index=True,
+    )
+    label: Mapped[str] = mapped_column(String(80), default="Transaction attachment")
+    original_filename: Mapped[str] = mapped_column(String(180))
+    content_type: Mapped[str] = mapped_column(String(40))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256_hex: Mapped[str] = mapped_column(String(64))
+    storage_key: Mapped[str] = mapped_column(String(80), unique=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class PortalSession(Base):
+    __tablename__ = "portal_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TransactionRecord(Base):
+    __tablename__ = "transactions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    reference: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    service: Mapped[str] = mapped_column(String(80))
+    amount_paise: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="recorded", index=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class InputModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AuthInput(InputModel):
+    identifier: str = Field(min_length=4, max_length=20)
+    password: str = Field(default="", min_length=0, max_length=128)
+    recovery: str = Field(default="", min_length=0, max_length=256)
+    activationToken: str = Field(default="", max_length=256)
+    name: str = Field(default="", max_length=80)
+    bootstrapToken: str = Field(default="", max_length=256)
+
+
+class RecoveryInput(InputModel):
+    identifier: str = Field(min_length=4, max_length=20)
+    password: str = Field(min_length=12, max_length=128)
+    recovery: str = Field(min_length=12, max_length=256)
+
+
+class OperatorRequestInput(InputModel):
+    name: str = Field(min_length=2, max_length=80)
+    mobile: str = Field(pattern=r"^\d{10,15}$")
+
+
+class StateInput(InputModel):
+    value: list[dict[str, Any]]
+
+
+class ApplicationInput(InputModel):
+    name: str = Field(min_length=2, max_length=80)
+    mobile: str = Field(pattern=r"^\d{10}$")
+    business: str = Field(min_length=2, max_length=100)
+    email: str = Field(min_length=3, max_length=254)
+    address: str = Field(min_length=5, max_length=200)
+    city: str = Field(min_length=2, max_length=80)
+    role: str = Field(pattern=r"^(retailer|distributor)$")
+    operationalPin: str = Field(default="", pattern=r"^$|^\d{6}$")
+    servicePincodes: list[str] = Field(default_factory=list, max_length=100)
+    correctionReference: str = Field(default="", max_length=80)
+
+    @field_validator("servicePincodes")
+    @classmethod
+    def check_pincodes(cls, pins: list[str]) -> list[str]:
+        if any(not p.isdigit() or len(p) != 6 for p in pins) or len(set(pins)) != len(pins):
+            raise ValueError("Service PIN codes must be unique six-digit values.")
+        return pins
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, email: str) -> str:
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email.strip()):
+            raise ValueError("Enter a valid email address.")
+        return email.strip().lower()
+
+
+class TransactionInput(InputModel):
+    reference: str = Field(min_length=4, max_length=80)
+    service: str = Field(min_length=2, max_length=80)
+    amountPaise: int = Field(ge=0, le=100_000_000)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class UplineRequestInput(InputModel):
+    reason: str = Field(default="", max_length=1000)
+
+
+def get_db():
+    with SessionLocal() as db:
+        yield db
+
+
+def document_public_data(document: CustomerDocument | TransactionDocument) -> dict[str, Any]:
+    result = {
+        "id": document.id,
+        "label": document.label,
+        "fileName": document.original_filename,
+        "size": document.size_bytes,
+        "type": document.content_type,
+        "uploadedAt": document.uploaded_at.isoformat(),
+    }
+    if isinstance(document, CustomerDocument):
+        result["revision"] = document.revision
+    return result
+
+
+def sanitize_filename(filename: str) -> str:
+    basename = Path(filename.replace("\\", "/")).name.strip()
+    cleaned = re.sub(r"[^A-Za-z0-9._() -]", "_", basename).strip(" .")
+    return cleaned[:180] or "customer-document"
+
+
+async def read_validated_document(upload: UploadFile) -> tuple[bytes, str, str]:
+    filename = sanitize_filename(upload.filename or "")
+    suffix = Path(filename).suffix.lower()
+    contents = await upload.read(MAX_DOCUMENT_BYTES + 1)
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded documents cannot be empty.")
+    if len(contents) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail="Each document must be 10 MB or smaller.")
+    if suffix == ".pdf" and contents.startswith(b"%PDF-") and b"%%EOF" in contents[-1024:]:
+        return contents, "application/pdf", filename
+    if suffix in {".jpg", ".jpeg", ".png"}:
+        try:
+            from PIL import Image, UnidentifiedImageError
+            with Image.open(BytesIO(contents)) as image:
+                expected_format = "PNG" if suffix == ".png" else "JPEG"
+                if image.format != expected_format:
+                    raise HTTPException(status_code=415, detail="A document's contents do not match its image file type.")
+                width, height = image.size
+                if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
+                    raise HTTPException(status_code=413, detail="Document image dimensions exceed the allowed limit.")
+                image.verify()
+        except HTTPException:
+            raise
+        except (UnidentifiedImageError, OSError) as error:
+            raise HTTPException(status_code=400, detail="An uploaded image is invalid or unreadable.") from error
+        content_type = "image/png" if suffix == ".png" else "image/jpeg"
+        return contents, content_type, filename
+    raise HTTPException(status_code=415, detail="Upload documents only as PDF, JPG, JPEG or PNG.")
+
+
+def document_fernet() -> Fernet:
+    secret = os.getenv("DOCUMENT_ENCRYPTION_KEY", "")
+    if not secret:
+        raise RuntimeError("DOCUMENT_ENCRYPTION_KEY must be configured before storing customer documents.")
+    try:
+        return Fernet(secret.encode("ascii"))
+    except (ValueError, UnicodeEncodeError) as error:
+        raise RuntimeError("DOCUMENT_ENCRYPTION_KEY must be a valid Fernet key.") from error
+
+
+def persist_document(storage_dir: Path, contents: bytes, fernet: Fernet) -> tuple[str, Path]:
+    storage_key = uuid4().hex + ".enc"
+    destination = storage_dir / storage_key
+    encrypted = fernet.encrypt(contents)
+    with destination.open("xb") as stored_file:
+        stored_file.write(encrypted)
+    if system() != "Windows":
+        destination.chmod(0o600)
+    return storage_key, destination
+
+
+def record_value(db: Session, key: str) -> list[dict[str, Any]]:
+    row = db.get(PortalRecord, key)
+    if row:
+        return row.value
+    if key == "rm-demo-master-contact":
+        return [{"name": "RAHAMTULLA MONDAL", "mobile": MASTER_ADMIN_MOBILE, "email": ""}]
+    return []
+
+
+def save_record(db: Session, key: str, value: list[dict[str, Any]]) -> None:
+    row = db.get(PortalRecord, key)
+    if row is None:
+        db.add(PortalRecord(key=key, value=value, updated_at=utc_now()))
+    else:
+        row.value = value
+        row.updated_at = utc_now()
+
+
+def hash_secret(secret: str) -> str:
+    salt = secrets.token_bytes(16)
+    hashed = scrypt(secret.encode(), salt=salt, n=2**15, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024)
+    return f"scrypt$32768$8$1${salt.hex()}${hashed.hex()}"
+
+
+DUMMY_PASSWORD_HASH = hash_secret("Not-a-real-password-123!")
+
+
+def verify_secret(secret: str, encoded: str | None) -> bool:
+    if not encoded:
+        return False
+    try:
+        algorithm, n, r, p, salt, expected = encoded.split("$")
+        if algorithm != "scrypt":
+            return False
+        actual = scrypt(
+            secret.encode(), salt=bytes.fromhex(salt), n=int(n), r=int(r), p=int(p),
+            dklen=len(bytes.fromhex(expected)), maxmem=64 * 1024 * 1024,
+        )
+        return compare_digest(actual.hex(), expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def issue_setup_token(user: User) -> str | None:
+    expires = user.setup_token_expires_at
+    if expires and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    if user.password_hash or (user.setup_token_hash and expires and expires > utc_now()):
+        return None
+    raw_token = secrets.token_urlsafe(32)
+    user.setup_token_hash = sha256(raw_token.encode()).hexdigest()
+    user.setup_token_expires_at = utc_now() + timedelta(days=7)
+    return raw_token
+
+
+def consume_setup_token(user: User, token: str) -> None:
+    expires = user.setup_token_expires_at
+    if expires and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=UTC)
+    supplied = sha256(token.encode()).hexdigest() if token else ""
+    if (
+        not token or not user.setup_token_hash
+        or not compare_digest(supplied, user.setup_token_hash)
+        or not expires or expires <= utc_now()
+    ):
+        raise HTTPException(status_code=403, detail="A valid one-time setup code is required.")
+    user.setup_token_hash = None
+    user.setup_token_expires_at = None
+
+
+def password_policy(password: str) -> None:
+    if not 12 <= len(password) <= 128:
+        raise HTTPException(status_code=422, detail="Password must be between 12 and 128 characters.")
+    if not (
+        any(c.islower() for c in password) and any(c.isupper() for c in password)
+        and any(c.isdigit() for c in password) and any(not c.isalnum() for c in password)
+    ):
+        raise HTTPException(status_code=422, detail="Use upper/lowercase letters, a number, and a symbol.")
+
+
+def normalized_identifier(identifier: str) -> str:
+    value = identifier.strip()
+    return value.upper() if any(character.isalpha() for character in value) else value
+
+
+def session_user_data(user: User) -> dict[str, str]:
+    return {
+        "id": user.id, "name": user.name, "mobile": user.mobile, "email": user.email,
+        "role": user.role, "userId": user.retail_id or "",
+    }
+
+
+def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    raw = request.cookies.get(COOKIE_NAME)
+    if not raw:
+        raise HTTPException(status_code=401, detail="Sign in is required.")
+    token_hash = sha256(raw.encode()).hexdigest()
+    portal_session = db.get(PortalSession, token_hash)
+    expires_at = portal_session.expires_at if portal_session else None
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if not portal_session or expires_at <= utc_now():
+        if portal_session:
+            db.delete(portal_session)
+            db.commit()
+        raise HTTPException(status_code=401, detail="Your session has expired. Sign in again.")
+    user = db.get(User, portal_session.user_id)
+    if not user or not user.is_active:
+        db.delete(portal_session)
+        db.commit()
+        raise HTTPException(status_code=401, detail="This account is not active.")
+    return user
+
+
+def role_required(*roles: str):
+    def dependency(user: User = Depends(current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(status_code=403, detail="You do not have permission for this operation.")
+        return user
+    return dependency
+
+
+def create_session(db: Session, response: Response, user: User) -> None:
+    raw = secrets.token_urlsafe(48)
+    db.add(PortalSession(
+        token_hash=sha256(raw.encode()).hexdigest(),
+        user_id=user.id,
+        expires_at=utc_now() + SESSION_LIFETIME,
+    ))
+    db.commit()
+    response.set_cookie(
+        COOKIE_NAME, raw, httponly=True, secure=COOKIE_SECURE, samesite="lax",
+        max_age=int(SESSION_LIFETIME.total_seconds()), path="/",
+    )
+
+
+def check_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if not origin:
+        raise HTTPException(status_code=403, detail="A same-origin request is required.")
+    parsed = urlparse(origin)
+    forwarded_scheme = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    if parsed.hostname != request.url.hostname or parsed.port != request.url.port:
+        raise HTTPException(status_code=403, detail="Cross-origin requests are not allowed.")
+    if parsed.scheme not in {"http", "https"} or (forwarded_scheme == "https" and parsed.scheme != "https"):
+        raise HTTPException(status_code=403, detail="Cross-origin requests are not allowed.")
+
+
+def application_values(db: Session) -> list[dict[str, Any]]:
+    rows = db.scalars(select(Application).order_by(Application.submitted_at.desc()))
+    return [dict(row.payload) for row in rows]
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.ocr_reader = easyocr.Reader(["en", "hi"], gpu=False)
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    document_fernet()
+    storage_dir = document_storage_dir()
+    storage_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if system() != "Windows":
+        storage_dir.chmod(0o700)
+    Base.metadata.create_all(engine)
+    with SessionLocal() as db:
+        db.execute(select(1))
     yield
+    engine.dispose()
 
 
-app = FastAPI(title="R.M Digital Centre local OCR", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=sorted(ALLOWED_ORIGINS),
-    allow_credentials=False,
-    allow_methods=["POST"],
-    allow_headers=["Content-Type"],
-)
+app = FastAPI(title="R.M Digital Centre Portal API", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        try:
+            check_origin(request)
+        except HTTPException as error:
+            return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+    if request.url.path in {"/api/applications", "/api/transactions"}:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_TOTAL_DOCUMENT_BYTES + 1024 * 1024:
+                    return JSONResponse(status_code=413, content={"detail": "Uploads exceed the 41 MB request limit."})
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "The request Content-Length is invalid."})
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if COOKIE_SECURE:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.get("/api/health")
+def health(db: Session = Depends(get_db)) -> dict[str, str]:
+    db.execute(select(1))
+    return {"status": "ok", "database": "connected"}
+
+
+@app.get("/api/public/config")
+def public_config() -> dict[str, str]:
+    return {"masterAdminMobile": MASTER_ADMIN_MOBILE}
+
+
+@app.get("/api/auth/me")
+def auth_me(user: User = Depends(current_user)) -> dict[str, Any]:
+    return {"authenticated": True, "user": session_user_data(user)}
+
+
+@app.post("/api/auth/lookup")
+def auth_lookup(body: AuthInput, db: Session = Depends(get_db)) -> dict[str, Any]:
+    identifier = normalized_identifier(body.identifier)
+    user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
+    if user is None and identifier == MASTER_ADMIN_MOBILE:
+        return {
+            "role": "master", "name": "Master Admin", "identifier": MASTER_ADMIN_MOBILE,
+            "mobile": MASTER_ADMIN_MOBILE, "passwordSet": False, "canSetup": True,
+        }
+    if not user or not user.is_active:
+        raise HTTPException(status_code=404, detail="Account could not be verified. Check the details or contact support.")
+    if user.role == "subadmin":
+        authorized = any(
+            item.get("mobile") == user.mobile and item.get("status") == "active"
+            and item.get("name", "").strip().casefold() == user.name.strip().casefold()
+            for item in record_value(db, "rm-demo-sub-admin-whitelist")
+        )
+        if not authorized:
+            raise HTTPException(status_code=403, detail="This Sub-Admin account is not currently authorized.")
+    return {
+        "role": user.role, "name": user.name, "identifier": user.retail_id or user.mobile,
+        "mobile": user.mobile, "passwordSet": user.password_hash is not None,
+        "canSetup": user.password_hash is None,
+    }
+
+
+@app.post("/api/auth/bootstrap")
+def bootstrap_master(
+    body: AuthInput, response: Response, db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    bootstrap_token = os.getenv("RM_MASTER_BOOTSTRAP_TOKEN", "")
+    if not bootstrap_token:
+        raise HTTPException(status_code=503, detail="Master setup is disabled. Configure RM_MASTER_BOOTSTRAP_TOKEN.")
+    if len(bootstrap_token) < 32:
+        raise HTTPException(status_code=503, detail="RM_MASTER_BOOTSTRAP_TOKEN must be at least 32 characters.")
+    if not compare_digest(body.bootstrapToken, bootstrap_token):
+        raise HTTPException(status_code=403, detail="The one-time setup token is incorrect.")
+    if normalized_identifier(body.identifier) != MASTER_ADMIN_MOBILE:
+        raise HTTPException(status_code=403, detail="Master Admin identity does not match server configuration.")
+    password_policy(body.password)
+    user = db.scalar(select(User).where(User.role == "master"))
+    if user and user.password_hash:
+        raise HTTPException(status_code=409, detail="Master Admin setup has already been completed.")
+    if user is None:
+        user = User(mobile=MASTER_ADMIN_MOBILE, name="Master Admin", role="master")
+        db.add(user)
+    user.password_hash = hash_secret(body.password)
+    user.recovery_hash = hash_secret(body.recovery) if len(body.recovery) >= 12 else None
+    user.updated_at = utc_now()
+    db.commit()
+    db.refresh(user)
+    create_session(db, response, user)
+    return {"user": session_user_data(user)}
+
+
+@app.post("/api/auth/setup")
+def setup_account(
+    body: AuthInput, response: Response, db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    identifier = normalized_identifier(body.identifier)
+    user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
+    if not user or not user.is_active or user.password_hash:
+        raise HTTPException(status_code=409, detail="This account is not eligible for first-time password setup.")
+    if user.role == "master":
+        raise HTTPException(status_code=403, detail="Use the one-time Master Admin setup flow.")
+    if user.role == "subadmin":
+        authorized = any(
+            item.get("mobile") == user.mobile and item.get("status") == "active"
+            and item.get("name", "").strip().casefold() == user.name.strip().casefold()
+            for item in record_value(db, "rm-demo-sub-admin-whitelist")
+        )
+        operator = next((item for item in record_value(db, "rm-demo-sub-admins")
+                         if item.get("mobile") == user.mobile and item.get("status") == "active"), None)
+        if not authorized or not operator:
+            raise HTTPException(status_code=403, detail="Sub-Admin access has not been approved.")
+        if body.name.strip().casefold() != user.name.strip().casefold():
+            raise HTTPException(status_code=403, detail="The Sub-Admin name does not match the authorized account.")
+    password_policy(body.password)
+    consume_setup_token(user, body.activationToken)
+    user.password_hash = hash_secret(body.password)
+    user.recovery_hash = hash_secret(body.recovery) if len(body.recovery) >= 12 else None
+    user.updated_at = utc_now()
+    db.commit()
+    create_session(db, response, user)
+    return {"user": session_user_data(user)}
+
+
+@app.post("/api/auth/login")
+def login(
+    body: AuthInput, request: Request, response: Response, db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    identifier = normalized_identifier(body.identifier)
+    remote = request.client.host if request.client else "unknown"
+    attempt_key = sha256((remote + "|" + identifier.casefold()).encode()).hexdigest()
+    attempt = db.get(LoginAttempt, attempt_key)
+    now = utc_now()
+    locked_until = attempt.locked_until if attempt else None
+    if locked_until and locked_until.tzinfo is None:
+        locked_until = locked_until.replace(tzinfo=UTC)
+    if locked_until and locked_until > now:
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts. Try again later.")
+    user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
+    if user and user.role == "subadmin":
+        authorized = any(
+            item.get("mobile") == user.mobile and item.get("status") == "active"
+            and item.get("name", "").strip().casefold() == user.name.strip().casefold()
+            for item in record_value(db, "rm-demo-sub-admin-whitelist")
+        )
+        if not authorized:
+            user = None
+        elif body.name.strip().casefold() != user.name.strip().casefold():
+            user = None
+    valid = verify_secret(body.password, user.password_hash if user else DUMMY_PASSWORD_HASH)
+    if not user or not user.is_active or not user.password_hash or not valid:
+        if attempt is None:
+            attempt = LoginAttempt(key=attempt_key, failures=0)
+            db.add(attempt)
+        attempt.failures += 1
+        if attempt.failures >= LOGIN_FAILURE_LIMIT:
+            attempt.failures = 0
+            attempt.locked_until = now + LOGIN_LOCK_TIME
+        db.commit()
+        raise HTTPException(status_code=401, detail="Mobile number or password is incorrect.")
+    if attempt:
+        db.delete(attempt)
+        db.commit()
+    create_session(db, response, user)
+    return {"user": session_user_data(user)}
+
+
+@app.post("/api/auth/recover")
+def recover_password(body: RecoveryInput, db: Session = Depends(get_db)) -> dict[str, str]:
+    identifier = normalized_identifier(body.identifier)
+    user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
+    if not user or not user.recovery_hash or not verify_secret(body.recovery, user.recovery_hash):
+        raise HTTPException(status_code=401, detail="Account details or recovery phrase are incorrect.")
+    password_policy(body.password)
+    user.password_hash = hash_secret(body.password)
+    user.updated_at = utc_now()
+    db.query(PortalSession).filter(PortalSession.user_id == user.id).delete()
+    db.commit()
+    return {"status": "password_updated"}
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> dict[str, str]:
+    raw = request.cookies.get(COOKIE_NAME)
+    if raw:
+        token_hash = sha256(raw.encode()).hexdigest()
+        session = db.get(PortalSession, token_hash)
+        if session:
+            db.delete(session)
+            db.commit()
+    response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=COOKIE_SECURE, samesite="lax")
+    return {"status": "signed_out"}
+
+
+@app.post("/api/auth/verify-password")
+def verify_current_password(
+    body: AuthInput, user: User = Depends(current_user),
+) -> dict[str, bool]:
+    if not verify_secret(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Password verification failed.")
+    return {"valid": True}
+
+
+@app.post("/api/admin/accounts/{identifier}/setup-code")
+def issue_account_setup_code(
+    identifier: str,
+    _: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    normalized = normalized_identifier(identifier)
+    user = db.scalar(select(User).where((User.mobile == normalized) | (User.retail_id == normalized)))
+    if not user or not user.is_active or user.password_hash:
+        raise HTTPException(status_code=409, detail="This account is not awaiting first-time setup.")
+    user.setup_token_hash = None
+    user.setup_token_expires_at = None
+    code = issue_setup_token(user)
+    db.commit()
+    if not code:
+        raise HTTPException(status_code=500, detail="A new setup code could not be generated.")
+    return {
+        "identifier": user.retail_id or user.mobile,
+        "mobile": user.mobile,
+        "code": code,
+        "expiresInHours": 168,
+    }
+
+
+@app.post("/api/admin/accounts/{identifier}/reset")
+def reset_account_password(
+    identifier: str,
+    _: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    normalized = normalized_identifier(identifier)
+    user = db.scalar(select(User).where((User.mobile == normalized) | (User.retail_id == normalized)))
+    if not user or user.role != "subadmin" or not user.is_active:
+        raise HTTPException(status_code=404, detail="An active Sub-Admin account was not found.")
+    user.password_hash = None
+    user.recovery_hash = None
+    user.setup_token_hash = None
+    user.setup_token_expires_at = None
+    db.query(PortalSession).filter(PortalSession.user_id == user.id).delete()
+    code = issue_setup_token(user)
+    db.commit()
+    if not code:
+        raise HTTPException(status_code=500, detail="The password reset code could not be generated.")
+    return {"identifier": user.mobile, "code": code, "expiresInHours": 168}
+
+
+@app.post("/api/auth/operator-request")
+def operator_request(body: OperatorRequestInput, db: Session = Depends(get_db)) -> dict[str, str]:
+    authorized = any(
+        item.get("mobile") == body.mobile and item.get("status") == "active"
+        and item.get("name", "").strip().casefold() == body.name.strip().casefold()
+        for item in record_value(db, "rm-demo-sub-admin-whitelist")
+    )
+    if not authorized:
+        raise HTTPException(status_code=403, detail="Name and mobile must match an active Master Admin authorization.")
+    requests = record_value(db, "rm-demo-operator-requests")
+    if any(item.get("mobile") == body.mobile and item.get("status") == "pending" for item in requests):
+        raise HTTPException(status_code=409, detail="A setup request for this mobile is already pending.")
+    requests.insert(0, {
+        "id": "SUB-" + uuid4().hex[:12].upper(), "name": body.name.strip(),
+        "mobile": body.mobile, "requestedAt": utc_now().isoformat(), "status": "pending",
+    })
+    save_record(db, "rm-demo-operator-requests", requests)
+    db.commit()
+    return {"status": "submitted"}
+
+
+def sync_retail_profiles(db: Session, profiles: list[dict[str, Any]]) -> list[dict[str, str]]:
+    sanitized = []
+    setup_codes = []
+    for profile in profiles:
+        user_id = str(profile.get("userId", "")).strip().upper()
+        mobile = str(profile.get("mobile", "")).strip()
+        name = str(profile.get("name", "")).strip()
+        email = str(profile.get("email", "")).strip().lower()
+        if not user_id or not mobile.isdigit() or len(mobile) != 10 or len(name) < 2:
+            raise HTTPException(status_code=422, detail="Retailer profile contains invalid identity fields.")
+        user = db.scalar(select(User).where(User.mobile == mobile))
+        if user and user.role != "retailer":
+            raise HTTPException(status_code=409, detail="That mobile is assigned to a different account type.")
+        existing_id = db.scalar(select(User).where(User.retail_id == user_id))
+        if existing_id and existing_id.mobile != mobile:
+            raise HTTPException(status_code=409, detail="That Retail ID is already assigned.")
+        if user is None:
+            user = User(mobile=mobile, retail_id=user_id, name=name, email=email, role="retailer")
+            db.add(user)
+        user.retail_id, user.name, user.email = user_id, name, email
+        user.is_active, user.updated_at = True, utc_now()
+        setup_code = issue_setup_token(user)
+        if setup_code:
+            setup_codes.append({"identifier": user_id, "mobile": mobile, "code": setup_code})
+        sanitized.append({k: v for k, v in profile.items() if k not in {"passwordHash", "password"}})
+    save_record(db, "rm-demo-retail-profiles", sanitized)
+    return setup_codes
+
+
+def sync_operators(db: Session) -> list[dict[str, str]]:
+    whitelist = record_value(db, "rm-demo-sub-admin-whitelist")
+    operators = record_value(db, "rm-demo-sub-admins")
+    setup_codes = []
+    for account in db.scalars(select(User).where(User.role == "subadmin")):
+        identity = next((item for item in whitelist if item.get("mobile") == account.mobile), None)
+        operator = next((item for item in operators if item.get("mobile") == account.mobile), None)
+        identity_active = bool(
+            identity and identity.get("status") == "active"
+            and identity.get("name", "").strip().casefold() == account.name.strip().casefold()
+        )
+        operator_active = bool(
+            operator and operator.get("status") == "active"
+            and operator.get("name", "").strip().casefold() == account.name.strip().casefold()
+        )
+        account.is_active = identity_active and operator_active
+        if identity_active and operator is None:
+            account.password_hash = None
+            account.recovery_hash = None
+            db.query(PortalSession).filter(PortalSession.user_id == account.id).delete()
+        elif not identity_active and (not identity or identity.get("status") in {"banned", "revoked"}):
+            account.password_hash = None
+            account.recovery_hash = None
+            db.query(PortalSession).filter(PortalSession.user_id == account.id).delete()
+    for operator in operators:
+        mobile = str(operator.get("mobile", ""))
+        active_identity = any(
+            auth.get("mobile") == mobile and auth.get("status") == "active"
+            and auth.get("name", "").strip().casefold() == str(operator.get("name", "")).strip().casefold()
+            for auth in whitelist
+        )
+        if operator.get("status") == "active" and active_identity:
+            account = db.scalar(select(User).where(User.mobile == mobile))
+            if account is None:
+                account = User(mobile=mobile, name=str(operator.get("name", "")), role="subadmin")
+                db.add(account)
+            else:
+                if account.role != "subadmin":
+                    raise HTTPException(status_code=409, detail="That mobile number is already assigned to another account.")
+                account.is_active = True
+                account.name = str(operator.get("name", ""))
+            setup_code = issue_setup_token(account)
+            if setup_code:
+                setup_codes.append({"identifier": mobile, "mobile": mobile, "code": setup_code})
+    db.flush()
+    return setup_codes
+
+
+def save_applications(db: Session, proposed: list[dict[str, Any]], actor: User) -> list[dict[str, str]]:
+    setup_codes = []
+    current = {item["id"]: item for item in application_values(db)}
+    values = {str(item.get("id", "")): item for item in proposed}
+    if len(values) != len(proposed) or not set(values).issubset(current):
+        raise HTTPException(status_code=409, detail="Applications cannot be added through this update.")
+    removed = set(current) - set(values)
+    if removed and actor.role != "master":
+        raise HTTPException(status_code=403, detail="Only the Master Admin can delete application records.")
+    for application_id in removed:
+        db.delete(db.get(Application, application_id))
+        maps = record_value(db, "rm-demo-distributor-pin-mappings")
+        save_record(db, "rm-demo-distributor-pin-mappings", [
+            item for item in maps if item.get("distributorApplicationId") != application_id
+        ])
+    fixed = {
+        "id", "name", "mobile", "business", "email", "address", "city", "role",
+        "operationalPin", "servicePincodes", "documents", "submittedAt",
+        "assignedDistributorApplicationId", "assignedDistributorId",
+        "assignedDistributorMobile", "assignedMasterAdmin", "routedAt", "accountUserId",
+        "revision", "revisionHistory",
+    }
+    mutable = {
+        "status", "generatedId", "rejectionReason", "rejectedAt", "rejectedBy",
+        "approvedBy", "approvedAt", "distributorQueueStatus",
+        "distributorReviewedAt", "blockedAt", "blockedBy",
+    }
+    own_distributor = next(
+        (item for item in current.values()
+         if item.get("role") == "distributor" and item.get("mobile") == actor.mobile
+         and item.get("status") == "approved"),
+        None,
+    )
+    for app_id, new in values.items():
+        old = current[app_id]
+        if actor.role == "distributor" and (
+            not own_distributor
+            or old.get("role") != "retailer"
+            or old.get("assignedDistributorApplicationId") != own_distributor.get("id")
+        ):
+            raise HTTPException(status_code=403, detail="This application is not assigned to your Distributor account.")
+        if actor.role == "subadmin" and old.get("assignedDistributorApplicationId"):
+            raise HTTPException(status_code=403, detail="This application is not in your review queue.")
+        protected_fields = fixed - {"documents", "revisionHistory"}
+        if actor.role == "master":
+            protected_fields.discard("servicePincodes")
+        if any(
+            (field in new and new.get(field) != old.get(field))
+            if field == "accountUserId"
+            else new.get(field) != old.get(field)
+            for field in protected_fields
+        ):
+            raise HTTPException(status_code=403, detail="Application identity and routing are server controlled.")
+        if "documents" in new and new["documents"] != old.get("documents", []):
+            raise HTTPException(status_code=403, detail="Application documents are managed by the secure upload service.")
+        if "revisionHistory" in new and new["revisionHistory"] != old.get("revisionHistory", []):
+            raise HTTPException(status_code=403, detail="Application revision history is managed by the server.")
+        if actor.role == "master" and "servicePincodes" in new:
+            pins = new["servicePincodes"]
+            if not isinstance(pins, list) or any(not isinstance(pin, str) or not pin.isdigit() or len(pin) != 6 for pin in pins):
+                raise HTTPException(status_code=422, detail="Distributor service PINs must be six-digit values.")
+            if len(pins) != len(set(pins)):
+                raise HTTPException(status_code=422, detail="Distributor service PINs must be unique.")
+        if any(field not in fixed | mutable for field in new):
+            raise HTTPException(status_code=422, detail="Unsupported application fields.")
+        if new.get("status") not in {"pending", "approved", "rejected", "correction_required", "blocked"}:
+            raise HTTPException(status_code=422, detail="Invalid application status.")
+        if old.get("status") == "approved" and new.get("status") != "approved" and actor.role != "master":
+            raise HTTPException(status_code=403, detail="Only the Master Admin can change an approved application.")
+        if actor.role != "master":
+            for field in ("approvedBy", "rejectedBy", "blockedBy"):
+                if field in new and new.get(field) != actor.name:
+                    raise HTTPException(status_code=403, detail="Reviewer identity is assigned by the authenticated server session.")
+            if old.get("status") != "pending" and new.get("status") != old.get("status"):
+                raise HTTPException(status_code=403, detail="Only pending applications can be reviewed.")
+        if new.get("status") == "approved" and old.get("status") != "approved":
+            generated_id = str(new.get("generatedId", "")).strip().upper()
+            if not generated_id:
+                raise HTTPException(status_code=422, detail="An official partner ID is required for approval.")
+            if old.get("role") == "distributor":
+                ensure_unique_distributor_pins(db, old)
+        old.update({field: new[field] for field in mutable if field in new})
+        row = db.get(Application, app_id)
+        row.payload = old
+        row.status = str(old.get("status", "pending"))
+        if row.status == "approved":
+            setup_codes.extend(sync_approved_account(db, old))
+    validate_all_distributor_pins(db)
+    return setup_codes
+
+
+def ensure_unique_distributor_pins(db: Session, applicant: dict[str, Any]) -> None:
+    pins = set(applicant.get("servicePincodes", []))
+    if not pins:
+        return
+    for other in application_values(db):
+        if other.get("id") == applicant.get("id") or other.get("role") != "distributor" or other.get("status") != "approved":
+            continue
+        mapped = set(other.get("servicePincodes", []))
+        mapped.update(
+            pin
+            for mapping in record_value(db, "rm-demo-distributor-pin-mappings")
+            if mapping.get("distributorApplicationId") == other.get("id")
+            for pin in mapping.get("pins", [])
+        )
+        if pins.intersection(mapped):
+            raise HTTPException(status_code=409, detail="One or more Distributor PIN codes already belong to another approved Distributor.")
+
+
+def validate_pin_mappings(db: Session, mappings: list[dict[str, Any]]) -> None:
+    applications = {item["id"]: item for item in application_values(db)}
+    seen: set[str] = set()
+    for mapping in mappings:
+        app_id = str(mapping.get("distributorApplicationId", ""))
+        distributor = applications.get(app_id)
+        if (
+            not distributor or distributor.get("role") != "distributor"
+            or distributor.get("status") != "approved"
+            or mapping.get("distributorId") != distributor.get("generatedId")
+        ):
+            raise HTTPException(status_code=422, detail="PIN mapping must reference an approved Distributor.")
+        if app_id in seen:
+            raise HTTPException(status_code=409, detail="A Distributor may have only one active PIN mapping.")
+        seen.add(app_id)
+        pins = mapping.get("pins", [])
+        if not isinstance(pins, list) or any(not isinstance(pin, str) or not pin.isdigit() or len(pin) != 6 for pin in pins):
+            raise HTTPException(status_code=422, detail="Distributor mappings must contain six-digit PIN codes.")
+        if len(pins) != len(set(pins)):
+            raise HTTPException(status_code=422, detail="Distributor mapping PIN codes must be unique.")
+
+
+def validate_all_distributor_pins(db: Session) -> None:
+    distributors = {
+        item["id"]: item for item in application_values(db)
+        if item.get("role") == "distributor" and item.get("status") == "approved"
+    }
+    owners: dict[str, str] = {}
+    for distributor_id, item in distributors.items():
+        mapping = next(
+            (entry for entry in record_value(db, "rm-demo-distributor-pin-mappings")
+             if entry.get("distributorApplicationId") == distributor_id
+             and entry.get("distributorId") == item.get("generatedId")),
+            {},
+        )
+        pins = list(item.get("servicePincodes", [])) + list(mapping.get("pins", []))
+        if any(not isinstance(pin, str) or not pin.isdigit() or len(pin) != 6 for pin in pins):
+            raise HTTPException(status_code=422, detail="Distributor mappings must contain six-digit PIN codes.")
+        for pin in set(pins):
+            existing_owner = owners.setdefault(pin, distributor_id)
+            if existing_owner != distributor_id:
+                raise HTTPException(status_code=409, detail="A PIN code can be assigned to only one approved Distributor.")
+
+
+def sync_approved_account(db: Session, data: dict[str, Any]) -> list[dict[str, str]]:
+    role = str(data.get("role", ""))
+    mobile = str(data.get("mobile", ""))
+    if role not in {"retailer", "distributor"} or not mobile:
+        return []
+    user = db.scalar(select(User).where(User.mobile == mobile))
+    if user and user.role != role:
+        raise HTTPException(status_code=409, detail="Mobile number conflicts with an existing staff account.")
+    if user is None:
+        user = User(mobile=mobile, name=str(data.get("name", "")), role=role)
+        db.add(user)
+    user.name = str(data.get("name", ""))
+    user.email = str(data.get("email", ""))
+    user.role = role
+    generated_id = str(data.get("generatedId", "")).upper()
+    duplicate_id = db.scalar(select(User).where(User.retail_id == generated_id, User.mobile != mobile)) if generated_id else None
+    if duplicate_id:
+        raise HTTPException(status_code=409, detail="That official partner ID is already assigned.")
+    user.retail_id = generated_id or None
+    user.is_active, user.updated_at = True, utc_now()
+    data["accountUserId"] = user.id
+    db.get(Application, str(data["id"])).payload = data
+    setup_code = issue_setup_token(user)
+    return [{"identifier": user.retail_id or user.mobile, "mobile": mobile, "code": setup_code}] if setup_code else []
+
+
+@app.get("/api/portal/state")
+def portal_state(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
+    if user.role not in {"master", "subadmin", "distributor"}:
+        raise HTTPException(status_code=403, detail="The operations workspace is for staff accounts.")
+    state = {}
+    for key in STATE_KEYS:
+        if key in MASTER_ONLY_KEYS and user.role != "master":
+            continue
+        records = record_value(db, key)
+        if key == "rm-demo-retail-profiles" and user.role == "master":
+            for profile in records:
+                account = db.scalar(select(User).where(User.retail_id == profile.get("userId")))
+                profile["isPasswordSet"] = bool(account and account.password_hash)
+        if key == "rm-demo-distributor-notifications" and user.role == "distributor":
+            records = [x for x in records if x.get("distributorMobile") == user.mobile]
+        state[key] = records
+    apps = application_values(db)
+    if user.role == "subadmin":
+        apps = [x for x in apps if not x.get("assignedDistributorApplicationId")]
+    elif user.role == "distributor":
+        profile = next((x for x in apps if x.get("mobile") == user.mobile and x.get("role") == "distributor"), None)
+        distributor_app_id = profile.get("id") if profile else ""
+        apps = [x for x in apps if x.get("assignedDistributorApplicationId") == distributor_app_id]
+        state["rm-demo-distributor-profile"] = [profile] if profile else []
+    if user.role != "master":
+        for application in apps:
+            application.pop("documents", None)
+            application.pop("revisionHistory", None)
+    state[APPLICATIONS_KEY] = apps
+    return {"user": session_user_data(user), "state": state}
+
+
+@app.get("/api/admin/applications")
+def admin_applications(
+    _: User = Depends(role_required("master")), db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    applications = list(db.scalars(select(Application).order_by(Application.submitted_at.desc())))
+    documents = list(db.scalars(select(CustomerDocument).order_by(CustomerDocument.uploaded_at.desc())))
+    documents_by_application: dict[str, list[dict[str, Any]]] = {}
+    for document in documents:
+        documents_by_application.setdefault(document.application_id, []).append({
+            **document_public_data(document),
+            "downloadUrl": (
+                "/api/admin/applications/" + document.application_id +
+                "/documents/" + document.id
+            ),
+        })
+    return [{
+        "id": item.id,
+        "name": item.payload.get("name", ""),
+        "mobile": item.mobile,
+        "business": item.payload.get("business", ""),
+        "email": item.payload.get("email", ""),
+        "role": item.role,
+        "status": item.status,
+        "submittedAt": item.submitted_at.isoformat(),
+        "documents": documents_by_application.get(item.id, []),
+    } for item in applications]
+
+
+@app.get("/api/admin/documents")
+def admin_document_submissions(
+    _: User = Depends(role_required("master")), db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    applications = list(db.scalars(select(Application).order_by(Application.submitted_at.desc())))
+    application_documents = list(db.scalars(
+        select(CustomerDocument).order_by(CustomerDocument.uploaded_at.desc()),
+    ))
+    documents_by_application: dict[str, list[dict[str, Any]]] = {}
+    for document in application_documents:
+        documents_by_application.setdefault(document.application_id, []).append({
+            **document_public_data(document),
+            "downloadUrl": (
+                "/api/admin/applications/" + document.application_id +
+                "/documents/" + document.id
+            ),
+        })
+
+    submissions = [{
+        "id": item.id,
+        "recordType": "application",
+        "formType": item.role.title() + " application",
+        "name": item.payload.get("name", ""),
+        "mobile": item.mobile,
+        "business": item.payload.get("business", ""),
+        "email": item.payload.get("email", ""),
+        "role": item.role,
+        "status": item.status,
+        "submittedAt": item.submitted_at.isoformat(),
+        "documents": documents_by_application.get(item.id, []),
+    } for item in applications]
+
+    transaction_documents = list(db.scalars(
+        select(TransactionDocument).order_by(TransactionDocument.uploaded_at.desc()),
+    ))
+    documents_by_transaction: dict[str, list[dict[str, Any]]] = {}
+    for document in transaction_documents:
+        documents_by_transaction.setdefault(document.transaction_id, []).append({
+            **document_public_data(document),
+            "downloadUrl": (
+                "/api/admin/transactions/" + document.transaction_id +
+                "/documents/" + document.id
+            ),
+        })
+    for transaction in db.scalars(select(TransactionRecord).order_by(TransactionRecord.created_at.desc())):
+        documents = documents_by_transaction.get(transaction.id)
+        if not documents:
+            continue
+        user = db.get(User, transaction.user_id)
+        submissions.append({
+            "id": transaction.id,
+            "recordType": "transaction",
+            "formType": transaction.service + " transaction",
+            "name": user.name if user else "Unknown account",
+            "mobile": user.mobile if user else "",
+            "business": transaction.reference,
+            "email": user.email if user else "",
+            "role": user.role if user else "",
+            "status": transaction.status,
+            "submittedAt": transaction.created_at.isoformat(),
+            "documents": documents,
+        })
+
+    return sorted(submissions, key=lambda item: item["submittedAt"], reverse=True)
+
+
+@app.get("/api/admin/applications/{application_id}/documents/{document_id}")
+def download_customer_document(
+    application_id: str,
+    document_id: str,
+    _: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    document = db.get(CustomerDocument, document_id)
+    if not document or document.application_id != application_id:
+        raise HTTPException(status_code=404, detail="The requested customer document was not found.")
+    storage_dir = document_storage_dir()
+    path = (storage_dir / document.storage_key).resolve()
+    if path.parent != storage_dir or not path.is_file():
+        LOGGER.error("Customer document storage is missing or invalid for document %s", document.id)
+        raise HTTPException(status_code=404, detail="The requested customer document is unavailable.")
+    try:
+        contents = document_fernet().decrypt(path.read_bytes())
+    except InvalidToken as error:
+        LOGGER.exception("Customer document integrity check failed for document %s", document.id)
+        raise HTTPException(status_code=500, detail="The requested customer document could not be verified.") from error
+    safe_filename = sanitize_filename(document.original_filename)
+    return StreamingResponse(
+        BytesIO(contents),
+        media_type=document.content_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+            "Content-Disposition": "attachment; filename=\"" + safe_filename + "\"",
+        },
+    )
+
+
+@app.get("/api/admin/transactions/{transaction_id}/documents/{document_id}")
+def download_transaction_document(
+    transaction_id: str,
+    document_id: str,
+    _: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    document = db.get(TransactionDocument, document_id)
+    if not document or document.transaction_id != transaction_id:
+        raise HTTPException(status_code=404, detail="The requested transaction document was not found.")
+    storage_dir = document_storage_dir()
+    path = (storage_dir / document.storage_key).resolve()
+    if path.parent != storage_dir or not path.is_file():
+        LOGGER.error("Transaction document storage is missing or invalid for document %s", document.id)
+        raise HTTPException(status_code=404, detail="The requested transaction document is unavailable.")
+    try:
+        contents = document_fernet().decrypt(path.read_bytes())
+    except InvalidToken as error:
+        LOGGER.exception("Transaction document integrity check failed for document %s", document.id)
+        raise HTTPException(status_code=500, detail="The requested transaction document could not be verified.") from error
+    safe_filename = sanitize_filename(document.original_filename)
+    return StreamingResponse(
+        BytesIO(contents),
+        media_type=document.content_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+            "Content-Disposition": "attachment; filename=\"" + safe_filename + "\"",
+        },
+    )
+
+
+@app.put("/api/portal/state/{key}")
+def update_state(
+    key: str, body: StateInput,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if key not in STATE_KEYS:
+        raise HTTPException(status_code=404, detail="Unknown portal collection.")
+    if key in MASTER_ONLY_KEYS and user.role != "master":
+        raise HTTPException(status_code=403, detail="Only the Master Admin can update this collection.")
+    setup_codes: list[dict[str, str]] = []
+    if key == "rm-demo-applications":
+        setup_codes = save_applications(db, body.value, user)
+    elif key == "rm-demo-retail-profiles":
+        if user.role != "master":
+            raise HTTPException(status_code=403, detail="Only the Master Admin can manage Retail IDs.")
+        setup_codes = sync_retail_profiles(db, body.value)
+    elif key == "rm-demo-approvals" and user.role != "master":
+        existing = record_value(db, key)
+        old_ids = {item.get("id") for item in existing}
+        new_items = [item for item in body.value if item.get("id") not in old_ids]
+        if (
+            len(body.value) < len(existing)
+            or any(item not in body.value for item in existing)
+            or any(item.get("status") != "pending" or item.get("operator") != user.name for item in new_items)
+        ):
+            raise HTTPException(status_code=403, detail="Sub-Admins may only submit their own approval requests.")
+        save_record(db, key, body.value)
+    else:
+        save_record(db, key, body.value)
+        if key == "rm-demo-distributor-pin-mappings":
+            validate_pin_mappings(db, body.value)
+            validate_all_distributor_pins(db)
+        if key in {"rm-demo-sub-admins", "rm-demo-sub-admin-whitelist"}:
+            setup_codes = sync_operators(db)
+    db.commit()
+    return {"status": "saved", "setupCodes": setup_codes if user.role == "master" else []}
+
+
+def matched_distributor(db: Session, pin: str) -> dict[str, Any] | None:
+    distributors = [
+        item for item in application_values(db)
+        if item.get("role") == "distributor" and item.get("status") == "approved"
+    ]
+    mappings = record_value(db, "rm-demo-distributor-pin-mappings")
+    matches = []
+    for item in distributors:
+        profile_pins = item.get("servicePincodes", [])
+        mapped_pins = next(
+            (entry.get("pins", []) for entry in mappings
+             if entry.get("distributorApplicationId") == item.get("id")
+             and entry.get("distributorId") == item.get("generatedId")),
+            [],
+        )
+        if pin in profile_pins or pin in mapped_pins:
+            matches.append(item)
+    return matches[0] if len(matches) == 1 else None
+
+
+@app.get("/api/public/pin-route")
+def pin_route(pin: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not pin.isdigit() or len(pin) != 6:
+        raise HTTPException(status_code=422, detail="Enter a valid six-digit PIN code.")
+    distributor = matched_distributor(db, pin)
+    if not distributor:
+        return {"matched": False}
+    return {
+        "matched": True, "name": distributor.get("name", ""),
+        "distributorId": distributor.get("generatedId", ""),
+    }
+
+
+@app.post("/api/applications")
+async def submit_application(
+    application: str = Form(...),
+    document_fields: str = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        body = ApplicationInput.model_validate_json(application)
+        submitted_fields = json.loads(document_fields)
+    except (ValidationError, ValueError, TypeError) as error:
+        raise HTTPException(status_code=422, detail="Application details or document fields are invalid.") from error
+    expected_fields = (
+        ["retailerIdentity", "retailerAddressProof", "retailerBusinessProof"]
+        if body.role == "retailer"
+        else list(DOCUMENT_FIELDS)
+    )
+    if (
+        not isinstance(submitted_fields, list)
+        or any(not isinstance(field_name, str) for field_name in submitted_fields)
+        or len(submitted_fields) != len(expected_fields)
+        or set(submitted_fields) != set(expected_fields)
+        or len(files) != len(expected_fields)
+    ):
+        raise HTTPException(status_code=422, detail="Upload every required application document exactly once.")
+
+    data = body.model_dump(exclude={"correctionReference"})
+    data.update({
+        "name": body.name.strip(), "mobile": body.mobile,
+        "business": body.business.strip(), "email": body.email.strip().lower(),
+        "address": body.address.strip(), "city": body.city.strip(),
+        "submittedAt": utc_now().isoformat(),
+    })
+    if body.role == "retailer" and not body.operationalPin:
+        raise HTTPException(status_code=422, detail="Retailer application requires a six-digit PIN.")
+    if body.role == "distributor" and body.operationalPin:
+        raise HTTPException(status_code=422, detail="Distributor applications do not use an operational retailer PIN.")
+    if any(x.get("mobile") == body.mobile for x in record_value(db, "rm-demo-blocked-partner-mobiles")):
+        raise HTTPException(status_code=403, detail="This mobile number is blocked from applying.")
+    correction_id = body.correctionReference.strip()
+    if correction_id:
+        row = db.get(Application, correction_id)
+        if not row or row.mobile != body.mobile or row.status not in {"rejected", "correction_required"}:
+            raise HTTPException(status_code=409, detail="This application is no longer eligible for correction.")
+        previous = dict(row.payload)
+        data.update({
+            "id": correction_id, "status": "pending",
+            "revision": int(previous.get("revision", 1)) + 1,
+            "revisionHistory": previous.get("revisionHistory", []) + [{
+                "submittedAt": previous.get("submittedAt", ""),
+                "rejectionReason": previous.get("rejectionReason", ""),
+                "documents": previous.get("documents", []),
+            }],
+        })
+        for field in ("rejectionReason", "rejectedAt", "rejectedBy"):
+            previous.pop(field, None)
+    else:
+        existing = db.scalar(select(Application).where(
+            Application.mobile == body.mobile,
+            Application.status.not_in(["rejected", "correction_required", "blocked"]),
+        ))
+        if existing:
+            raise HTTPException(status_code=409, detail=f"An application for this mobile is already on file (reference {existing.id}).")
+        data.update({"id": "APP-" + uuid4().hex[:12].upper(), "status": "pending", "revision": 1})
+    distributor = matched_distributor(db, body.operationalPin) if body.role == "retailer" else None
+    if body.role == "retailer":
+        if distributor:
+            data.update({
+                "assignedDistributorApplicationId": distributor["id"],
+                "assignedDistributorId": distributor.get("generatedId", ""),
+                "assignedDistributorMobile": distributor.get("mobile", ""),
+                "assignedMasterAdmin": False,
+            })
+        else:
+            data["assignedMasterAdmin"] = True
+        data["routedAt"] = utc_now().isoformat()
+    revision = int(data.get("revision", 1))
+    storage_dir = document_storage_dir()
+    saved_paths: list[Path] = []
+    total_size = 0
+    attached_documents = []
+    fernet = document_fernet()
+    try:
+        if not correction_id:
+            db.add(Application(
+                id=data["id"], mobile=body.mobile, role=body.role, status="pending",
+                distributor_application_id=str(data.get("assignedDistributorApplicationId", "")),
+                submitted_at=utc_now(), payload={**data, "documents": []},
+            ))
+            db.flush()
+        for field_name, upload in zip(submitted_fields, files):
+            contents, content_type, filename = await read_validated_document(upload)
+            total_size += len(contents)
+            if total_size > MAX_TOTAL_DOCUMENT_BYTES:
+                raise HTTPException(status_code=413, detail="All application documents together must be 40 MB or smaller.")
+            storage_key, saved_path = await run_in_threadpool(
+                persist_document, storage_dir, contents, fernet,
+            )
+            saved_paths.append(saved_path)
+            document = CustomerDocument(
+                application_id=data["id"],
+                revision=revision,
+                label=DOCUMENT_FIELDS[field_name],
+                original_filename=filename,
+                content_type=content_type,
+                size_bytes=len(contents),
+                sha256_hex=sha256(contents).hexdigest(),
+                storage_key=storage_key,
+                uploaded_at=utc_now(),
+            )
+            db.add(document)
+            db.flush()
+            attached_documents.append(document_public_data(document))
+        data["documents"] = attached_documents
+
+        if correction_id:
+            row.payload = data
+            row.status = "pending"
+            row.distributor_application_id = str(data.get("assignedDistributorApplicationId", ""))
+            row.submitted_at = utc_now()
+        else:
+            row = db.get(Application, data["id"])
+            row.payload = data
+        if distributor:
+            notifications = record_value(db, "rm-demo-distributor-notifications")
+            notifications.insert(0, {
+                "id": "NTF-" + uuid4().hex[:12].upper(),
+                "distributorApplicationId": distributor["id"],
+                "distributorId": distributor.get("generatedId", ""),
+                "distributorMobile": distributor.get("mobile", ""),
+                "applicationId": data["id"], "operationalPin": body.operationalPin,
+                "message": "New Retailer application waiting for review.",
+                "createdAt": utc_now().isoformat(), "status": "queued",
+            })
+            save_record(db, "rm-demo-distributor-notifications", notifications)
+        db.commit()
+    except Exception as error:
+        db.rollback()
+        for saved_path in saved_paths:
+            saved_path.unlink(missing_ok=True)
+        if not isinstance(error, HTTPException):
+            LOGGER.exception("Application submission or document storage failed")
+        raise
+    finally:
+        for upload in files:
+            await upload.close()
+    return {"application": data, "assignedDistributor": (
+        {"name": distributor.get("name", ""), "generatedId": distributor.get("generatedId", "")}
+        if distributor else None
+    )}
+
+
+@app.get("/api/applications/lookup")
+def lookup_application(reference: str, mobile: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    row = db.get(Application, reference.strip())
+    if not row or not compare_digest(row.mobile, mobile.strip()):
+        raise HTTPException(status_code=404, detail="No application matched that reference and mobile number.")
+    return {"application": row.payload}
+
+
+@app.get("/api/public/application-status")
+def application_status(mobile: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not mobile.isdigit() or len(mobile) != 10:
+        raise HTTPException(status_code=422, detail="Enter a valid 10-digit mobile number.")
+    blocked = any(x.get("mobile") == mobile for x in record_value(db, "rm-demo-blocked-partner-mobiles"))
+    if blocked:
+        return {"blocked": True, "application": None}
+    row = db.scalar(select(Application).where(Application.mobile == mobile).order_by(Application.submitted_at.desc()))
+    return {"blocked": False, "application": (
+        {"id": row.id, "status": row.status, "role": row.role} if row else None
+    )}
+
+
+@app.post("/api/retailer/activate")
+def activate_retailer(body: AuthInput, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
+    if not body.name.isdigit() or len(body.name) != 10:
+        raise HTTPException(status_code=422, detail="Confirm the registered 10-digit mobile number.")
+    user = db.scalar(select(User).where(User.retail_id == normalized_identifier(body.identifier)))
+    if not user or user.mobile != body.name or user.role != "retailer" or user.password_hash:
+        raise HTTPException(status_code=403, detail="Retail ID or registered mobile number could not be verified.")
+    password_policy(body.password)
+    if len(body.recovery) < 12:
+        raise HTTPException(status_code=422, detail="Recovery phrase must be at least 12 characters.")
+    consume_setup_token(user, body.activationToken)
+    user.password_hash = hash_secret(body.password)
+    user.recovery_hash = hash_secret(body.recovery)
+    user.updated_at = utc_now()
+    db.commit()
+    create_session(db, response, user)
+    return {"user": session_user_data(user)}
+
+
+@app.get("/api/retailer/profile")
+def retailer_profile(
+    user: User = Depends(role_required("retailer")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    contact = record_value(db, "rm-demo-master-contact")
+    return {"profile": session_user_data(user), "upline": contact[0] if contact else {
+        "name": "RAHAMTULLA MONDAL", "mobile": MASTER_ADMIN_MOBILE, "email": "",
+    }}
+
+
+@app.post("/api/retailer/upline-request")
+def request_upline_change(
+    body: UplineRequestInput,
+    user: User = Depends(role_required("retailer")),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    requests = record_value(db, "rm-demo-upline-requests")
+    if any(item.get("userId") == user.retail_id and item.get("status") == "pending" for item in requests):
+        raise HTTPException(status_code=409, detail="A Upline change request is already awaiting review.")
+    requests.insert(0, {
+        "id": "UPL-" + uuid4().hex[:12].upper(),
+        "userId": user.retail_id,
+        "name": user.name,
+        "mobile": user.mobile,
+        "reason": body.reason.strip(),
+        "requestedAt": utc_now().isoformat(),
+        "status": "pending",
+    })
+    save_record(db, "rm-demo-upline-requests", requests)
+    db.commit()
+    return {"status": "received"}
+
+
+@app.post("/api/transactions")
+async def create_transaction(
+    request: Request,
+    user: User = Depends(role_required("master", "subadmin", "retailer", "distributor")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    uploads: list[StarletteUploadFile] = []
+    try:
+        if request.headers.get("content-type", "").startswith("multipart/form-data"):
+            form = await request.form()
+            form_uploads = form.getlist("files")
+            uploads = [item for item in form_uploads if isinstance(item, StarletteUploadFile)]
+            if len(uploads) != len(form_uploads):
+                raise HTTPException(status_code=422, detail="Transaction attachments are invalid.")
+            raw_transaction = form.get("transaction")
+            if not isinstance(raw_transaction, str):
+                raise HTTPException(status_code=422, detail="Transaction details are required.")
+            body = TransactionInput.model_validate_json(raw_transaction)
+        elif request.headers.get("content-type", "").startswith("application/json"):
+            body = TransactionInput.model_validate(await request.json())
+        else:
+            raise HTTPException(status_code=415, detail="Submit transaction details as JSON or multipart form data.")
+    except HTTPException:
+        for upload in uploads:
+            await upload.close()
+        raise
+    except (ValidationError, ValueError, TypeError) as error:
+        for upload in uploads:
+            await upload.close()
+        raise HTTPException(status_code=422, detail="Transaction details are invalid.") from error
+
+    reference = body.reference.strip()
+    saved_paths: list[Path] = []
+    documents: list[dict[str, Any]] = []
+    total_size = 0
+    try:
+        if len(uploads) > 10:
+            raise HTTPException(status_code=422, detail="A transaction can include at most 10 documents.")
+        if db.scalar(select(TransactionRecord).where(TransactionRecord.reference == reference)):
+            raise HTTPException(status_code=409, detail="Transaction reference already exists.")
+        row = TransactionRecord(
+            user_id=user.id, reference=reference, service=body.service.strip(),
+            amount_paise=body.amountPaise, details=body.details,
+        )
+        db.add(row)
+        db.flush()
+        if uploads:
+            storage_dir = document_storage_dir()
+            fernet = document_fernet()
+            for upload in uploads:
+                contents, content_type, filename = await read_validated_document(upload)
+                total_size += len(contents)
+                if total_size > MAX_TOTAL_DOCUMENT_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="All transaction documents together must be 40 MB or smaller.",
+                    )
+                storage_key, saved_path = await run_in_threadpool(
+                    persist_document, storage_dir, contents, fernet,
+                )
+                saved_paths.append(saved_path)
+                document = TransactionDocument(
+                    transaction_id=row.id,
+                    original_filename=filename,
+                    content_type=content_type,
+                    size_bytes=len(contents),
+                    sha256_hex=sha256(contents).hexdigest(),
+                    storage_key=storage_key,
+                    uploaded_at=utc_now(),
+                )
+                db.add(document)
+                db.flush()
+                documents.append(document_public_data(document))
+        db.commit()
+    except Exception as error:
+        db.rollback()
+        for saved_path in saved_paths:
+            saved_path.unlink(missing_ok=True)
+        if not isinstance(error, HTTPException):
+            LOGGER.exception("Transaction submission or document storage failed")
+        raise
+    finally:
+        for upload in uploads:
+            await upload.close()
+    return {**transaction_data(row), "documents": documents}
+
+
+@app.get("/api/transactions")
+def list_transactions(user: User = Depends(current_user), db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    query = select(TransactionRecord).order_by(TransactionRecord.created_at.desc())
+    if user.role != "master":
+        query = query.where(TransactionRecord.user_id == user.id)
+    return [transaction_data(item) for item in db.scalars(query.limit(500))]
+
+
+def transaction_data(row: TransactionRecord) -> dict[str, Any]:
+    return {
+        "id": row.id, "reference": row.reference, "service": row.service,
+        "amountPaise": row.amount_paise, "status": row.status,
+        "details": row.details, "createdAt": row.created_at.isoformat(),
+    }
+
+
+@app.post("/api/service-enquiries")
+def create_service_enquiry(body: dict[str, Any], db: Session = Depends(get_db)) -> dict[str, str]:
+    name = str(body.get("name", "")).strip()[:80]
+    mobile = str(body.get("mobile", "")).strip()
+    service = str(body.get("service", "")).strip()[:80]
+    message = str(body.get("message", "")).strip()[:1000]
+    if len(name) < 2 or not mobile.isdigit() or len(mobile) != 10 or len(service) < 2:
+        raise HTTPException(status_code=422, detail="Enter a valid name, mobile and service.")
+    requests = record_value(db, "rm-demo-service-requests")
+    requests.insert(0, {
+        "id": "SRV-" + uuid4().hex[:12].upper(), "name": name, "mobile": mobile,
+        "service": service, "message": message,
+        "requestedAt": utc_now().isoformat(), "status": "pending",
+    })
+    save_record(db, "rm-demo-service-requests", requests)
+    db.commit()
+    return {"status": "received"}
+
+
+def get_ocr_reader() -> Any:
+    global _ocr_reader
+    if _ocr_reader is None:
+        with OCR_LOCK:
+            if _ocr_reader is None:
+                import easyocr
+                _ocr_reader = easyocr.Reader(["en", "hi"], gpu=False)
+    return _ocr_reader
 
 
 @app.post("/api/scan-document")
-async def scan_document(request: Request, file: UploadFile = File(...)) -> dict[str, str]:
-    if request.headers.get("origin") not in ALLOWED_ORIGINS:
-        raise HTTPException(status_code=403, detail="Requests must come from the local portal.")
-    if file.content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="Select a JPEG or PNG image. PDF scanning is not supported.",
-        )
-
+async def scan_document(file: UploadFile = File(...)) -> dict[str, str]:
+    if file.content_type not in {"image/jpeg", "image/png"}:
+        raise HTTPException(status_code=415, detail="Select a JPEG or PNG image. PDF scanning is not supported.")
     contents = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(contents) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="The image must be 8 MB or smaller.")
     if not contents:
         raise HTTPException(status_code=400, detail="The uploaded image is empty.")
-
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="The image must be 8 MB or smaller.")
     try:
+        import cv2
+        import numpy as np
+        from PIL import Image, UnidentifiedImageError
         with Image.open(BytesIO(contents)) as image_header:
             if image_header.format not in {"JPEG", "PNG"}:
-                raise HTTPException(
-                    status_code=415,
-                    detail="Select a JPEG or PNG image. PDF scanning is not supported.",
-                )
+                raise HTTPException(status_code=415, detail="Select a JPEG or PNG image.")
             width, height = image_header.size
-            if (
-                width > MAX_IMAGE_DIMENSION
-                or height > MAX_IMAGE_DIMENSION
-                or width * height > MAX_IMAGE_PIXELS
-            ):
-                raise HTTPException(
-                    status_code=413,
-                    detail="Image dimensions exceed the local scan service limit.",
-                )
+            if width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
+                raise HTTPException(status_code=413, detail="Image dimensions exceed the scan service limit.")
             image_header.verify()
+        image = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
+    except HTTPException:
+        raise
     except UnidentifiedImageError as error:
-        raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
-    except Image.DecompressionBombError as error:
-        raise HTTPException(status_code=413, detail="The image dimensions exceed the scan service limit.") from error
-    except (OSError, SyntaxError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="The upload is not a valid image.") from error
+    except Exception as error:
+        LOGGER.exception("Document image validation failed")
         raise HTTPException(status_code=400, detail="The uploaded image could not be decoded.") from error
-
-    encoded_image = np.frombuffer(contents, dtype=np.uint8)
-    image = cv2.imdecode(encoded_image, cv2.IMREAD_COLOR)
     if image is None:
         raise HTTPException(status_code=400, detail="The uploaded file is not a readable image.")
-
-    height, width = image.shape[:2]
-    if height > MAX_IMAGE_DIMENSION or width > MAX_IMAGE_DIMENSION:
-        raise HTTPException(
-            status_code=413,
-            detail="Image dimensions must not exceed 8000 by 8000 pixels.",
-        )
-
     try:
-        results = await run_in_threadpool(app.state.ocr_reader.readtext, image)
+        reader = await run_in_threadpool(get_ocr_reader)
+        results = await run_in_threadpool(reader.readtext, image)
     except Exception as error:
-        LOGGER.exception("Local document OCR failed")
-        raise HTTPException(status_code=500, detail="OCR processing failed.") from error
-
-    extracted_text = " ".join(result[1] for result in results)
+        LOGGER.exception("Document OCR failed")
+        raise HTTPException(status_code=503, detail="OCR processing is unavailable. Try again later.") from error
     return {
         "status": "success",
-        "extracted_text": extracted_text,
+        "extracted_text": " ".join(result[1] for result in results),
         "message": "Image text extraction completed. Document authenticity was not verified.",
     }
+
+
+@app.get("/{file_path:path}", include_in_schema=False)
+def serve_frontend(file_path: str):
+    if file_path and file_path not in STATIC_FILES:
+        raise HTTPException(status_code=404, detail="Not found.")
+    candidate = (BASE_DIR / file_path).resolve()
+    if not candidate.is_file():
+        candidate = BASE_DIR / "index.html"
+    return FileResponse(candidate)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("ocr_server:app", host="0.0.0.0", port=int(os.getenv("PORT", "8766")))

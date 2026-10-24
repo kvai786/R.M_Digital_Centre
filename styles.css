@@ -1737,6 +1737,35 @@ a:focus-visible {
     background: #fff;
 }
 
+.customer-document-card {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+}
+
+.customer-document-list {
+    display: grid;
+    gap: 10px;
+    margin: 16px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.customer-document-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.customer-document-list li > span {
+    overflow-wrap: anywhere;
+}
+
 .distributor-mapping-card {
     grid-template-columns: minmax(0, 0.8fr) minmax(280px, 1.2fr);
     align-items: start;
@@ -2029,6 +2058,11 @@ a:focus-visible {
     .application-card {
         grid-template-columns: 1fr;
         gap: 16px;
+    }
+
+    .customer-document-list li {
+        align-items: flex-start;
+        flex-direction: column;
     }
 
     .whitelist-form {

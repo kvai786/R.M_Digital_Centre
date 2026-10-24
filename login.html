@@ -38,8 +38,10 @@
             </form>
             <form id="first-time-setup-form" class="flow-step" hidden>
                 <h2 id="setup-title">Set up your password</h2>
-                <p class="form-intro">Choose a strong password and a recovery phrase. Keep your recovery phrase private; it is needed to reset your account.</p>
+                <p class="form-intro">Use the one-time setup code provided by the Master Admin, then choose a strong password and recovery phrase. Keep both codes private.</p>
                 <div class="field" id="setup-name-field" hidden><label for="setup-name">Full name</label><input id="setup-name" name="name" autocomplete="name"></div>
+                <div class="field" id="bootstrap-token-field" hidden><label for="bootstrap-token">One-time Master Admin setup token</label><input id="bootstrap-token" name="bootstrapToken" type="password" autocomplete="off" maxlength="256"></div>
+                <div class="field" id="activation-token-field" hidden><label for="activation-token">One-time account setup code</label><input id="activation-token" name="activationToken" type="password" autocomplete="off" maxlength="256"></div>
                 <div class="field"><label for="setup-password">New password</label><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
                 <div class="field"><label for="setup-password-confirm">Confirm password</label><input id="setup-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
                 <div class="field"><label for="setup-recovery">Recovery phrase (12+ characters)</label><input id="setup-recovery" name="recovery" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
@@ -48,10 +50,13 @@
             </form>
             <form id="retailer-activation-form" class="flow-step" hidden>
                 <h2>Activate your Retail ID</h2>
-                <p class="form-intro">Confirm the mobile number on your official Retailer profile and create your password. Activation can only be completed once.</p>
+                <p class="form-intro">Confirm the registered mobile and enter the one-time setup code provided by the Master Admin. Activation can only be completed once.</p>
                 <div class="field"><label for="retail-activation-mobile">Registered mobile number</label><input id="retail-activation-mobile" name="mobile" type="tel" inputmode="numeric" autocomplete="tel" pattern="[0-9]{10}" maxlength="10" required></div>
+                <div class="field"><label for="retail-activation-token">One-time account setup code</label><input id="retail-activation-token" name="activationToken" type="password" autocomplete="off" maxlength="256" required></div>
                 <div class="field"><label for="retail-activation-password">New password</label><input id="retail-activation-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
                 <div class="field"><label for="retail-activation-password-confirm">Confirm password</label><input id="retail-activation-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <div class="field"><label for="retail-activation-recovery">Recovery phrase (12+ characters)</label><input id="retail-activation-recovery" name="recovery" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
+                <div class="field"><label for="retail-activation-recovery-confirm">Confirm recovery phrase</label><input id="retail-activation-recovery-confirm" name="recoveryConfirm" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
                 <button class="btn primary form-submit" type="submit">Activate Retail ID</button>
                 <button class="text-button" type="button" id="retail-activation-back">Use a different ID</button>
             </form>
@@ -73,7 +78,7 @@
                 <button class="btn primary form-submit" type="submit">Request Master approval</button>
             </form>
             <p class="form-status" id="login-status" role="status" aria-live="polite" hidden></p>
-            <p class="data-handling-note">Account information is stored in this browser and is not protected by a server-backed identity service. Do not use real passwords or sensitive account information.</p>
+            <p class="data-handling-note">Sign-in is managed by the server. Never share your password, recovery phrase, or one-time setup token.</p>
             <p class="form-note">Not a partner yet? <a href="register.html">Apply for a Retailer or Distributor ID</a>.</p>
             <button class="install-app-button" id="install-app-button" type="button" hidden>Install app</button>
             <p class="install-app-status form-status" id="install-app-status" role="status" aria-live="polite" hidden></p>

@@ -30,7 +30,7 @@
         <div class="dashboard-heading">
             <div><p class="eyebrow">PARTNER OPERATIONS</p><h1>Partner application workspace</h1><p>Authorized Master Admins and Sub-Admins can approve, request corrections, block numbers, and manage application records.</p></div>
         </div>
-        <div class="data-handling-note operations-data-note">This workspace stores credentials, access records, applications, and enquiries in this browser. These records are not protected by a server-backed authentication service and are not shared across devices. Do not use it to manage real customer accounts or personal information.</div>
+        <div class="data-handling-note operations-data-note">This workspace uses server-managed authentication and database-backed records. Do not store passwords, OTPs, Aadhaar numbers, or banking PINs in application notes.</div>
         <section class="operator-controls" aria-labelledby="operator-title">
             <div><h2 id="operator-title">Signed-in operator</h2><p id="operator-caption">Master Admin</p></div>
             <div class="operator-hierarchy"><span>Master Admin</span><span aria-hidden="true">→</span><span>Sub-Admin / Operator</span></div>
@@ -65,7 +65,7 @@
             </form>
             <form id="master-contact-form" class="whitelist-form master-contact-form">
                 <div class="field"><label>Master Distributor name</label><input value="RAHAMTULLA MONDAL" readonly></div>
-                <div class="field"><label>Master Distributor mobile</label><input value="8509010483" readonly></div>
+                <div class="field"><label for="master-contact-mobile">Master Distributor mobile</label><input id="master-contact-mobile" readonly></div>
                 <div class="field"><label for="master-contact-email">Master Distributor email</label><input id="master-contact-email" name="email" type="email" maxlength="254" required></div>
                 <button class="btn secondary" type="submit">Save upline contact</button>
             </form>
@@ -73,7 +73,7 @@
             <div id="retailer-profile-list" class="application-list" aria-live="polite"></div>
         </section>
         <section class="dashboard-section master-only" id="distributor-mapping-section" aria-labelledby="distributor-mapping-title" hidden>
-            <div class="section-heading"><div><p class="eyebrow">DISTRIBUTOR TERRITORIES</p><h2 id="distributor-mapping-title">PIN code routing</h2><p class="section-desc">Assign each six-digit service PIN code to one approved Distributor. Matching Retailer applications appear in that Distributor's queue in this browser. Queue links do not authenticate users, and notification delivery is not configured.</p></div></div>
+            <div class="section-heading"><div><p class="eyebrow">DISTRIBUTOR TERRITORIES</p><h2 id="distributor-mapping-title">PIN code routing</h2><p class="section-desc">Assign each six-digit service PIN code to one approved Distributor. Matching Retailer applications appear only in that Distributor's authenticated server-side queue.</p></div></div>
             <div id="distributor-mapping-list" class="application-list" aria-live="polite"></div>
             <p class="form-status" id="distributor-mapping-status" role="status" aria-live="polite" hidden></p>
         </section>
@@ -82,8 +82,13 @@
             <p class="distributor-notification-status" id="distributor-notification-status" role="status" aria-live="polite" hidden></p>
             <div id="application-list" class="application-list" aria-live="polite"></div>
         </section>
-        <section class="dashboard-section" aria-labelledby="service-enquiries-title">
-            <div class="section-heading"><div><p class="eyebrow">SERVICE DESK</p><h2 id="service-enquiries-title">Service enquiries</h2><p class="section-desc">Enquiries are stored in this browser and are not delivered to applicants. Never request OTPs, PINs, or banking credentials.</p></div></div>
+        <section class="dashboard-section master-only" id="customer-documents-section" aria-labelledby="customer-documents-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">SECURE DOCUMENT REVIEW</p><h2 id="customer-documents-title">Customer / Retailer Applications &amp; Documents</h2><p class="section-desc">Application submissions and transactions with attached files are visible only to the authenticated Master Admin. Documents are served from protected storage.</p></div></div>
+            <p class="form-status" id="customer-document-status" role="status" aria-live="polite" hidden></p>
+            <div id="customer-document-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section master-only" aria-labelledby="service-enquiries-title">
+            <div class="section-heading"><div><p class="eyebrow">SERVICE DESK</p><h2 id="service-enquiries-title">Service enquiries</h2><p class="section-desc">Enquiries are stored in the operations database for follow-up. Never request OTPs, PINs, or banking credentials.</p></div></div>
             <div id="service-request-list" class="application-list" aria-live="polite"></div>
         </section>
         <section class="dashboard-section master-only" id="upline-requests-section" aria-labelledby="upline-requests-title" hidden>

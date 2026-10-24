@@ -1,6 +1,6 @@
 "use strict";
 
-const MASTER_ADMIN_MOBILE = "8509010483";
+let MASTER_ADMIN_MOBILE = "8509010483";
 const APPLICATIONS_KEY = "rm-demo-applications";
 const BLOCKED_PARTNER_MOBILES_KEY = "rm-demo-blocked-partner-mobiles";
 const DISTRIBUTOR_PIN_MAPPINGS_KEY = "rm-demo-distributor-pin-mappings";
@@ -9,26 +9,88 @@ const OPERATORS_KEY = "rm-demo-sub-admins";
 const OPERATOR_REQUESTS_KEY = "rm-demo-operator-requests";
 const OPERATOR_WHITELIST_KEY = "rm-demo-sub-admin-whitelist";
 const MASTER_APPROVALS_KEY = "rm-demo-approvals";
-const CREDENTIALS_KEY = "rm-demo-staff-credentials";
-const STAFF_SESSION_KEY = "rm-demo-authenticated-staff";
-const CURRENT_SUBADMIN_KEY = "currentSubAdmin";
 const PENDING_WELCOME_KEY = "rm-demo-pending-welcome";
 const RETAIL_PROFILES_KEY = "rm-demo-retail-profiles";
-const RETAIL_SESSION_KEY = "rm-demo-authenticated-retailer";
 const MASTER_CONTACT_KEY = "rm-demo-master-contact";
 const UPLINE_REQUESTS_KEY = "rm-demo-upline-requests";
 const SERVICE_REQUESTS_KEY = "rm-demo-service-requests";
-const PASSWORD_ITERATIONS = 210000;
-const STAFF_SESSION_LIFETIME = 8 * 60 * 60 * 1000;
-const DOCUMENT_SCAN_API_URL = "http://127.0.0.1:8001/api/scan-document";
+const DOCUMENT_SCAN_API_URL = "/api/scan-document";
 const MAX_SCAN_FILE_SIZE = 8 * 1024 * 1024;
-document.addEventListener("DOMContentLoaded", function () {
+let PORTAL_STATE = {};
+let PORTAL_USER = null;
+let PORTAL_RETAILER = null;
+const PORTAL_WRITE_QUEUES = new Map();
+
+async function apiRequest(path, options) {
+    const requestOptions = Object.assign({ credentials: "same-origin" }, options || {});
+    if (requestOptions.body && typeof requestOptions.body !== "string" &&
+        !(requestOptions.body instanceof FormData)) {
+        requestOptions.headers = Object.assign({}, requestOptions.headers, { "Content-Type": "application/json" });
+        requestOptions.body = JSON.stringify(requestOptions.body);
+    }
+    const response = await fetch(path, requestOptions);
+    const result = await response.json().catch(function () { return {}; });
+    if (!response.ok) {
+        throw new Error(result.detail || "The server could not complete this request.");
+    }
+    return result;
+}
+
+function reportApiFailure(error) {
+    console.error("Portal API request failed:", error);
+    const status = document.getElementById("dashboard-status") ||
+        document.getElementById("application-status") ||
+        document.getElementById("login-status") ||
+        document.getElementById("service-request-status");
+    if (status) {
+        status.textContent = error.message || "The server request failed. Please try again.";
+        status.hidden = false;
+    }
+}
+
+async function hydratePortalData() {
+    const page = document.body.dataset.page;
+    if (page === "operations") {
+        try {
+            const result = await apiRequest("/api/portal/state");
+            PORTAL_USER = result.user;
+            PORTAL_STATE = result.state;
+        } catch (error) {
+            if (!/sign in|session has expired/i.test(error.message)) {
+                throw error;
+            }
+        }
+    } else if (page === "retailer") {
+        try {
+            const result = await apiRequest("/api/retailer/profile");
+            PORTAL_USER = result.profile;
+            PORTAL_RETAILER = result;
+        } catch (error) {
+            if (!/sign in|session has expired|permission/i.test(error.message)) {
+                throw error;
+            }
+        }
+    }
+}
+
+document.addEventListener("DOMContentLoaded", async function () {
+    try {
+        const config = await apiRequest("/api/public/config");
+        MASTER_ADMIN_MOBILE = config.masterAdminMobile;
+    } catch (error) {
+        reportApiFailure(error);
+    }
+    try {
+        await hydratePortalData();
+    } catch (error) {
+        reportApiFailure(error);
+    }
     const currentYear = document.getElementById("current-year");
     if (currentYear) {
         currentYear.textContent = String(new Date().getFullYear());
     }
 
-    initializeApplicationForm();
+    initializeServerApplicationForm();
     initializeDocumentScanner();
     initializePortalLogin();
     initializeOperationsDashboard();
@@ -37,460 +99,259 @@ document.addEventListener("DOMContentLoaded", function () {
     initializePwa();
 });
 
-function initializeApplicationForm() {
+function initializeServerApplicationForm() {
     const form = document.getElementById("application-form");
     if (!form) {
         return;
     }
-
     const roleInput = document.getElementById("application-role");
     const distributorDocuments = document.getElementById("distributor-documents");
-    const roleButtons = document.querySelectorAll("[data-role-choice]");
-    const successPanel = document.getElementById("submission-success");
+    const operationalPin = document.getElementById("operational-pin");
+    const distributorPins = document.getElementById("distributor-service-pincodes");
     const status = document.getElementById("application-status");
-    const pinRouteStatus = document.getElementById("pin-route-status");
-    const applicationLookup = document.querySelector(".application-lookup");
+    const roleButtons = document.querySelectorAll("[data-role-choice]");
     const lookupForm = document.getElementById("rejected-lookup-form");
     const lookupStatus = document.getElementById("rejected-lookup-status");
     const lookupResult = document.getElementById("rejected-application-result");
     const correctionWorkspace = document.getElementById("correction-workspace");
-    const applicationMobileInput = document.getElementById("applicant-mobile");
-    const operationalPinInput = document.getElementById("operational-pin");
-    const distributorPinInput = document.getElementById("distributor-service-pincodes");
-    const params = new URLSearchParams(window.location.search);
-    let editingApplicationId = null;
+    const successPanel = document.getElementById("submission-success");
+    let editingApplicationId = "";
+
+    function showStatus(element, message) {
+        element.textContent = message;
+        element.hidden = false;
+    }
 
     function setRole(role) {
-        const distributor = role === "distributor";
+        const isDistributor = role === "distributor";
         roleInput.value = role;
-        document.getElementById("distributor-pin-field").hidden = !distributor;
-        distributorPinInput.disabled = !distributor;
-        distributorPinInput.required = false;
-        operationalPinInput.required = !distributor;
-        operationalPinInput.disabled = distributor;
-        document.getElementById("operational-pin-field").hidden = distributor;
-        distributorDocuments.hidden = role !== "distributor";
+        document.getElementById("distributor-pin-field").hidden = !isDistributor;
+        distributorPins.disabled = !isDistributor;
+        operationalPin.disabled = isDistributor;
+        document.getElementById("operational-pin-field").hidden = isDistributor;
+        distributorDocuments.hidden = !isDistributor;
         distributorDocuments.querySelectorAll("input").forEach(function (input) {
-            input.required = role === "distributor";
-            input.disabled = role !== "distributor";
+            input.disabled = !isDistributor;
+            input.required = isDistributor;
         });
+        form.querySelectorAll('input[name="retailerIdentity"], input[name="retailerAddressProof"], input[name="retailerBusinessProof"]')
+            .forEach(function (input) { input.required = true; });
         roleButtons.forEach(function (button) {
             const selected = button.dataset.roleChoice === role;
             button.classList.toggle("selected", selected);
             button.setAttribute("aria-selected", String(selected));
             button.tabIndex = selected ? 0 : -1;
         });
-        form.setAttribute("aria-labelledby", distributor ? "distributor-tab" : "retailer-tab");
-        document.getElementById("application-flow-title").textContent = distributor
-            ? "Distributor application details"
-            : "Retailer application details";
-        document.getElementById("application-flow-description").textContent = distributor
+        form.setAttribute("aria-labelledby", isDistributor ? "distributor-tab" : "retailer-tab");
+        document.getElementById("application-flow-title").textContent =
+            isDistributor ? "Distributor application details" : "Retailer application details";
+        document.getElementById("application-flow-description").textContent = isDistributor
             ? "Apply to build and support a network of Retailer partners."
             : "Apply to provide local customer services as a Retailer partner.";
-        document.getElementById("application-submit-button").textContent = editingApplicationId
-            ? "Resubmit corrected application"
-            : "Submit " + (distributor ? "Distributor" : "Retailer") + " application";
+        document.getElementById("application-submit-button").textContent =
+            editingApplicationId ? "Resubmit corrected application"
+                : "Submit " + (isDistributor ? "Distributor" : "Retailer") + " application";
     }
 
+    const initialRole = new URLSearchParams(window.location.search).get("role") === "distributor"
+        ? "distributor" : "retailer";
     roleButtons.forEach(function (button) {
         button.addEventListener("click", function () {
-            if (editingApplicationId) {
-                return;
-            }
-            setRole(button.dataset.roleChoice);
+            if (!editingApplicationId) setRole(button.dataset.roleChoice);
         });
         button.addEventListener("keydown", function (event) {
-            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
-                return;
-            }
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
             event.preventDefault();
-            const nextRole = event.key === "Home" ? "retailer"
-                : event.key === "End" ? "distributor"
-                    : button.dataset.roleChoice === "retailer" ? "distributor" : "retailer";
-            setRole(nextRole);
-            document.getElementById(nextRole + "-tab").focus();
+            const role = event.key === "Home" ? "retailer" : event.key === "End" ? "distributor"
+                : button.dataset.roleChoice === "retailer" ? "distributor" : "retailer";
+            setRole(role);
+            document.getElementById(role + "-tab").focus();
         });
     });
-    setRole(params.get("role") === "distributor" ? "distributor" : "retailer");
-    operationalPinInput.addEventListener("input", function () {
-        const digits = operationalPinInput.value.replace(/\D/g, "").slice(0, 6);
-        if (operationalPinInput.value !== digits) {
-            operationalPinInput.value = digits;
-        }
-        operationalPinInput.setCustomValidity("");
-        if (digits.length !== 6) {
-            pinRouteStatus.textContent = "";
-            pinRouteStatus.classList.remove("matched", "unmatched");
-            return;
-        }
-        const distributor = findDistributorForPin(digits);
-        if (distributor) {
-            pinRouteStatus.textContent = "Matched local Distributor: " + distributor.name +
-                " · ID " + distributor.generatedId + ".";
-            pinRouteStatus.classList.add("matched");
-            pinRouteStatus.classList.remove("unmatched");
-        } else {
-            pinRouteStatus.textContent = "No approved Distributor is mapped yet. The Master Admin will review applications for this PIN.";
-            pinRouteStatus.classList.add("unmatched");
-            pinRouteStatus.classList.remove("matched");
+    setRole(initialRole);
+
+    operationalPin.addEventListener("input", async function () {
+        const pin = operationalPin.value.replace(/\D/g, "").slice(0, 6);
+        operationalPin.value = pin;
+        const routeStatus = document.getElementById("pin-route-status");
+        routeStatus.classList.remove("matched", "unmatched");
+        routeStatus.textContent = "";
+        if (pin.length !== 6) return;
+        try {
+            const result = await apiRequest("/api/public/pin-route?pin=" + encodeURIComponent(pin));
+            if (result.matched) {
+                routeStatus.textContent = "Matched local Distributor: " + result.name + " · ID " + result.distributorId + ".";
+                routeStatus.classList.add("matched");
+            } else {
+                routeStatus.textContent = "No approved Distributor is mapped yet. The Master Admin will review this application.";
+                routeStatus.classList.add("unmatched");
+            }
+        } catch (error) {
+            reportApiFailure(error);
         }
     });
-    if (params.has("application")) {
-        document.getElementById("rejected-reference").value = params.get("application");
-    }
 
-    function isCorrectionStatus(application) {
-        const currentStatus = normalizeApplicationStatus(application);
-        return currentStatus === "rejected" || currentStatus === "correction_required";
-    }
-
-    function findRejectedApplicationByMobile(mobile) {
-        return readList(APPLICATIONS_KEY)
-            .filter(function (item) {
-                return item.mobile === mobile && isCorrectionStatus(item);
-            })
-            .sort(function (left, right) {
-                const leftTime = new Date(left.rejectedAt || left.submittedAt || 0).getTime();
-                const rightTime = new Date(right.rejectedAt || right.submittedAt || 0).getTime();
-                return rightTime - leftTime;
-            })[0] || null;
-    }
-
-    function clearFreshApplicationDetails() {
-        form.reset();
-        editingApplicationId = null;
-        applicationMobileInput.value = "";
-        setRole(params.get("role") === "distributor" ? "distributor" : "retailer");
-        operationalPinInput.dispatchEvent(new Event("input", { bubbles: true }));
-        status.hidden = true;
-        status.textContent = "";
-    }
-
-    function openCorrectionApplication(application) {
-        clearFreshApplicationDetails();
+    function openCorrection(application) {
         editingApplicationId = application.id;
-        document.getElementById("applicant-name").value = application.name || "";
-        applicationMobileInput.value = application.mobile || "";
-        document.getElementById("business-name").value = application.business || "";
-        document.getElementById("email").value = application.email || "";
-        document.getElementById("address").value = application.address || "";
-        document.getElementById("city").value = application.city || "";
-        operationalPinInput.value = application.operationalPin || "";
-        distributorPinInput.value = Array.isArray(application.servicePincodes)
-            ? application.servicePincodes.join(", ")
-            : "";
         setRole(application.role === "distributor" ? "distributor" : "retailer");
-        operationalPinInput.dispatchEvent(new Event("input", { bubbles: true }));
-        document.getElementById("correction-reason").textContent =
-            application.rejectionReason || "Please review your details and upload the corrected documents.";
-        document.getElementById("correction-reference").textContent = application.id;
-        applicationLookup.hidden = false;
-        correctionWorkspace.hidden = false;
+        const values = {
+            "applicant-name": application.name,
+            "applicant-mobile": application.mobile,
+            "business-name": application.business,
+            email: application.email,
+            address: application.address,
+            city: application.city,
+            "operational-pin": application.operationalPin || "",
+            "distributor-service-pincodes": (application.servicePincodes || []).join(", "),
+        };
+        Object.keys(values).forEach(function (id) {
+            const input = document.getElementById(id);
+            if (input) input.value = values[id] || "";
+        });
         document.querySelector(".role-picker").hidden = true;
-        form.hidden = false;
-        successPanel.hidden = true;
-        status.hidden = true;
+        document.querySelector(".application-lookup").hidden = false;
+        correctionWorkspace.hidden = false;
+        document.getElementById("correction-title").textContent = "Update your application";
+        document.getElementById("correction-reference").textContent = application.id;
+        document.getElementById("correction-reason").textContent =
+            application.rejectionReason || "Upload the required documents again, correct your details, and resubmit.";
+        document.getElementById("start-new-application").focus();
+        form.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    lookupForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
         lookupStatus.hidden = true;
         lookupResult.hidden = true;
-        correctionWorkspace.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-
-    [applicationMobileInput, document.getElementById("rejected-mobile")].forEach(function (input) {
-        input.addEventListener("paste", function (event) {
-            const pastedText = event.clipboardData && event.clipboardData.getData("text");
-            if (pastedText === undefined) {
-                return;
-            }
-            event.preventDefault();
-            input.value = pastedText.replace(/\D/g, "").slice(0, 10);
-            input.dispatchEvent(new Event("input", { bubbles: true }));
-        });
-        input.addEventListener("input", function () {
-            const digits = input.value.replace(/\D/g, "").slice(0, 10);
-            if (input.value !== digits) {
-                input.value = digits;
-            }
-            input.setCustomValidity("");
-        });
-    });
-
-    lookupForm.addEventListener("submit", function (event) {
-        event.preventDefault();
-        if (!lookupForm.reportValidity()) {
-            return;
-        }
         const reference = document.getElementById("rejected-reference").value.trim();
         const mobile = document.getElementById("rejected-mobile").value.trim();
-        const isBlocked = isPartnerMobileBlocked(mobile);
-        if (isBlocked) {
-            lookupResult.hidden = true;
-            lookupStatus.textContent = "This mobile number is permanently blocked from submitting applications.";
-            lookupStatus.hidden = false;
-            return;
+        try {
+            const result = await apiRequest("/api/applications/lookup?reference=" +
+                encodeURIComponent(reference) + "&mobile=" + encodeURIComponent(mobile));
+            const application = result.application;
+            if (!["rejected", "correction_required"].includes(application.status)) {
+                showStatus(lookupStatus, "Only rejected applications can be corrected here.");
+                return;
+            }
+            lookupResult.innerHTML = '<p>Application <strong>' + escapeHTML(application.id) +
+                '</strong> was rejected. Reason: ' + escapeHTML(application.rejectionReason || "Please review your details.") +
+                '</p><button class="btn primary" type="button" data-resubmit-application>Correct application</button>';
+            lookupResult.hidden = false;
+            lookupResult.querySelector("[data-resubmit-application]").addEventListener("click", function () {
+                openCorrection(application);
+            });
+        } catch (error) {
+            showStatus(lookupStatus, error.message);
         }
-        const application = readList(APPLICATIONS_KEY).find(function (item) {
-            return item.id === reference && item.mobile === mobile;
-        });
-        lookupResult.hidden = true;
-        lookupStatus.hidden = false;
-        if (!application) {
-            lookupStatus.textContent = "No application matched that reference and registered mobile number.";
-            return;
-        }
-        if (!isCorrectionStatus(application)) {
-            const currentStatus = application.status === "approved" ? "approved" : "still pending review";
-            lookupStatus.textContent = "This application is " + currentStatus + ". Only rejected applications can be edited and resubmitted here.";
-            return;
-        }
-        openCorrectionApplication(application);
-    });
-
-    lookupResult.addEventListener("click", function (event) {
-        const button = event.target.closest("[data-resubmit-application]");
-        if (!button) {
-            return;
-        }
-        const application = readList(APPLICATIONS_KEY).find(function (item) {
-            return item.id === button.dataset.resubmitApplication &&
-                item.mobile === document.getElementById("rejected-mobile").value.trim() &&
-                isCorrectionStatus(item);
-        });
-        if (!application) {
-            lookupStatus.textContent = "This rejected application is no longer available for editing. Search again for its current status.";
-            lookupStatus.hidden = false;
-            lookupResult.hidden = true;
-            return;
-        }
-        openCorrectionApplication(application);
     });
 
     document.getElementById("start-new-application").addEventListener("click", function () {
-        correctionWorkspace.hidden = true;
-        applicationLookup.hidden = true;
+        editingApplicationId = "";
+        form.reset();
+        setRole(initialRole);
         document.querySelector(".role-picker").hidden = false;
+        correctionWorkspace.hidden = true;
         lookupResult.hidden = true;
-        lookupStatus.hidden = true;
-        clearFreshApplicationDetails();
-        applicationMobileInput.focus();
-        successPanel.hidden = true;
+        status.hidden = true;
     });
 
     form.addEventListener("submit", async function (event) {
         event.preventDefault();
-        const mobileInput = document.getElementById("applicant-mobile");
-        if (!/^\d{10}$/.test(mobileInput.value)) {
-            mobileInput.setCustomValidity("Enter exactly 10 numeric digits.");
-            mobileInput.reportValidity();
-            return;
-        }
-        mobileInput.setCustomValidity("");
-
-        if (isPartnerMobileBlocked(mobileInput.value)) {
-            correctionWorkspace.hidden = true;
-            status.textContent = "This mobile number is permanently blocked from submitting or correcting applications.";
-            status.hidden = false;
+        status.hidden = true;
+        const mobile = document.getElementById("applicant-mobile").value.trim();
+        if (!/^\d{10}$/.test(mobile)) {
+            showStatus(status, "Enter exactly 10 numeric digits for the mobile number.");
             return;
         }
         if (!editingApplicationId) {
-            const rejectedApplication = findRejectedApplicationByMobile(mobileInput.value);
-            if (rejectedApplication) {
-                openCorrectionApplication(rejectedApplication);
+            try {
+                const current = await apiRequest("/api/public/application-status?mobile=" + encodeURIComponent(mobile));
+                if (current.blocked) {
+                    showStatus(status, "This mobile number is blocked from submitting applications.");
+                    return;
+                }
+                if (current.application && ["pending", "approved"].includes(current.application.status)) {
+                    showStatus(status, "An application for this mobile is already on file (reference " +
+                        current.application.id + "). A duplicate application was not submitted.");
+                    return;
+                }
+                if (current.application && ["rejected", "correction_required"].includes(current.application.status)) {
+                    const found = await apiRequest("/api/applications/lookup?reference=" +
+                        encodeURIComponent(current.application.id) + "&mobile=" + encodeURIComponent(mobile));
+                    openCorrection(found.application);
+                    return;
+                }
+            } catch (error) {
+                showStatus(status, error.message);
                 return;
             }
         }
-        if (editingApplicationId) {
-            const currentCorrection = readList(APPLICATIONS_KEY).find(function (item) {
-                return item.id === editingApplicationId && item.mobile === mobileInput.value &&
-                    isCorrectionStatus(item);
-            });
-            if (!currentCorrection) {
-                status.textContent = "This application is no longer eligible for correction. Check its current status before continuing.";
-                status.hidden = false;
-                return;
-            }
-        } else {
-            const existingApplication = readList(APPLICATIONS_KEY).find(function (application) {
-                const applicationStatus = normalizeApplicationStatus(application);
-                return application.mobile === mobileInput.value &&
-                    applicationStatus !== "rejected" &&
-                    applicationStatus !== "correction_required" &&
-                    applicationStatus !== "blocked";
-            });
-            if (existingApplication) {
-                status.textContent = "An application for this mobile number is already " +
-                    (normalizeApplicationStatus(existingApplication) === "approved" ? "approved" : "pending review") +
-                    " (reference " + existingApplication.id + "). A duplicate application was not submitted.";
-                status.hidden = false;
-                return;
-            }
+        const pins = roleInput.value === "distributor"
+            ? distributorPins.value.split(",").map(function (pin) { return pin.trim(); }).filter(Boolean)
+            : [];
+        if (roleInput.value === "retailer" && !/^\d{6}$/.test(operationalPin.value.trim())) {
+            showStatus(status, "Enter a valid six-digit operational PIN code.");
+            return;
         }
-        let assignedDistributor = null;
-        let servicePincodes = [];
-        if (roleInput.value === "retailer") {
-            const operationalPin = operationalPinInput.value.trim();
-            if (!/^\d{6}$/.test(operationalPin)) {
-                operationalPinInput.setCustomValidity("Enter exactly 6 numeric digits for the operational PIN code.");
-                operationalPinInput.reportValidity();
-                return;
-            }
-            operationalPinInput.setCustomValidity("");
-            assignedDistributor = findDistributorForPin(operationalPin);
-        } else {
-            servicePincodes = distributorPinInput.value.split(",").map(function (pin) {
-                return pin.trim();
-            }).filter(Boolean);
-            if (servicePincodes.some(function (pin) { return !/^\d{6}$/.test(pin); }) ||
-                new Set(servicePincodes).size !== servicePincodes.length) {
-                status.textContent = "Enter unique six-digit Distributor service PIN codes, separated by commas.";
-                status.hidden = false;
-                return;
-            }
+        if (new Set(pins).size !== pins.length || pins.some(function (pin) { return !/^\d{6}$/.test(pin); })) {
+            showStatus(status, "Enter unique six-digit Distributor service PIN codes, separated by commas.");
+            return;
         }
         let fieldError;
         try {
             fieldError = await validatePartnerApplication(form, roleInput.value);
         } catch (error) {
-            status.textContent = "The selected documents could not be inspected. Please select the files again.";
-            status.hidden = false;
+            showStatus(status, "The selected documents could not be inspected. Please select them again.");
             return;
         }
         if (fieldError) {
-            status.textContent = fieldError;
-            status.hidden = false;
+            showStatus(status, fieldError);
             return;
         }
-        if (!form.reportValidity()) {
-            return;
-        }
-
-        const data = new FormData(form);
-        const applicationData = {
-            name: String(data.get("name")).trim(),
-            mobile: String(data.get("mobile")).trim(),
-            business: String(data.get("business")).trim(),
-            email: String(data.get("email")).trim(),
-            address: String(data.get("address")).trim(),
-            city: String(data.get("city")).trim(),
+        if (!form.reportValidity()) return;
+        const formData = new FormData(form);
+        const payload = {
+            name: String(formData.get("name")).trim(),
+            mobile: mobile,
+            business: String(formData.get("business")).trim(),
+            email: String(formData.get("email")).trim(),
+            address: String(formData.get("address")).trim(),
+            city: String(formData.get("city")).trim(),
             role: roleInput.value,
-            operationalPin: roleInput.value === "retailer" ? operationalPinInput.value.trim() : "",
-            servicePincodes: roleInput.value === "distributor" ? servicePincodes : [],
-            documents: Array.from(form.querySelectorAll('input[type="file"]:not(:disabled)')).map(function (input) {
-                return {
-                    label: input.labels && input.labels[0] ? input.labels[0].textContent.trim() : input.name,
-                    fileName: input.files[0].name,
-                    size: input.files[0].size,
-                    type: input.files[0].type
-                };
-            }),
-            submittedAt: new Date().toISOString()
+            operationalPin: roleInput.value === "retailer" ? operationalPin.value.trim() : "",
+            servicePincodes: pins,
+            correctionReference: editingApplicationId,
         };
-        const applications = readList(APPLICATIONS_KEY);
-        let application;
-        let previousDistributorApplicationId = "";
-        if (editingApplicationId) {
-            application = applications.find(function (item) {
-                return item.id === editingApplicationId && isCorrectionStatus(item);
-            });
-            if (!application) {
-                status.textContent = "This rejected application can no longer be edited. Search again for its current status.";
-                status.hidden = false;
-                return;
-            }
-            previousDistributorApplicationId = application.assignedDistributorApplicationId || "";
-            if (!Array.isArray(application.revisionHistory)) {
-                application.revisionHistory = [];
-            }
-            application.revisionHistory.push({
-                submittedAt: application.submittedAt,
-                rejectionReason: application.rejectionReason || "",
-                documents: application.documents,
-                operationalPin: application.operationalPin || "",
-                assignedDistributorApplicationId: previousDistributorApplicationId
-            });
-            Object.assign(application, applicationData, {
-                status: "pending",
-                revision: (Number(application.revision) || 1) + 1,
-                assignedDistributorApplicationId: assignedDistributor ? assignedDistributor.applicationId : "",
-                assignedDistributorId: assignedDistributor ? assignedDistributor.generatedId : "",
-                assignedDistributorMobile: assignedDistributor ? assignedDistributor.mobile : "",
-                assignedMasterAdmin: !assignedDistributor,
-                routedAt: assignedDistributor || roleInput.value === "retailer"
-                    ? new Date().toISOString()
-                    : ""
-            });
-            delete application.rejectionReason;
-            delete application.rejectedAt;
-            delete application.rejectedBy;
-        } else {
-            application = Object.assign({
-                id: createReference("APP"),
-                status: "pending",
-                revision: 1
-            }, applicationData);
-            if (assignedDistributor) {
-                application.assignedDistributorApplicationId = assignedDistributor.applicationId;
-                application.assignedDistributorId = assignedDistributor.generatedId;
-                application.assignedDistributorMobile = assignedDistributor.mobile;
-                application.routedAt = new Date().toISOString();
-                application.assignedMasterAdmin = false;
-            } else if (application.role === "retailer") {
-                application.assignedMasterAdmin = true;
-                application.routedAt = new Date().toISOString();
-            }
-            applications.unshift(application);
+        const documentInputs = Array.from(form.querySelectorAll('input[type="file"]:not(:disabled)'));
+        const requestBody = new FormData();
+        requestBody.append("application", JSON.stringify(payload));
+        requestBody.append("document_fields", JSON.stringify(documentInputs.map(function (input) {
+            return input.name;
+        })));
+        documentInputs.forEach(function (input) {
+            requestBody.append("files", input.files[0], input.files[0].name);
+        });
+        try {
+            const result = await apiRequest("/api/applications", { method: "POST", body: requestBody });
+            const application = result.application;
+            document.getElementById("application-reference").textContent = application.id;
+            document.getElementById("application-success-message").textContent = result.assignedDistributor
+                ? "Your application was routed to " + result.assignedDistributor.name + " (Distributor ID " +
+                    result.assignedDistributor.generatedId + ") for review."
+                : application.role === "retailer"
+                    ? "No approved Distributor covers PIN code " + application.operationalPin +
+                        ". The application was routed to the Master Admin for review."
+                    : editingApplicationId
+                        ? "Your corrected application was securely submitted for review."
+                        : "Your application was securely submitted for review.";
+            form.hidden = true;
+            document.querySelector(".role-picker").hidden = true;
+            document.querySelector(".application-lookup").hidden = true;
+            successPanel.hidden = false;
+        } catch (error) {
+            showStatus(status, error.message);
         }
-        writeList(APPLICATIONS_KEY, applications);
-        if (previousDistributorApplicationId &&
-            (!assignedDistributor || previousDistributorApplicationId !== assignedDistributor.applicationId)) {
-            const notifications = readList(DISTRIBUTOR_NOTIFICATIONS_KEY);
-            notifications.forEach(function (notification) {
-                if (notification.applicationId === application.id &&
-                    notification.distributorApplicationId === previousDistributorApplicationId &&
-                    notification.status === "queued") {
-                    notification.status = "rerouted";
-                    notification.updatedAt = new Date().toISOString();
-                }
-            });
-            writeList(DISTRIBUTOR_NOTIFICATIONS_KEY, notifications);
-        }
-        if (assignedDistributor) {
-            const notifications = readList(DISTRIBUTOR_NOTIFICATIONS_KEY);
-            notifications.unshift({
-                id: createReference("NTF"),
-                distributorApplicationId: assignedDistributor.applicationId,
-                distributorId: assignedDistributor.generatedId,
-                distributorMobile: assignedDistributor.mobile,
-                applicationId: application.id,
-                operationalPin: application.operationalPin,
-                message: "New Retailer application " + application.id + " is waiting for review for PIN " +
-                    application.operationalPin + ".",
-                createdAt: new Date().toISOString(),
-                status: "queued"
-            });
-            writeList(DISTRIBUTOR_NOTIFICATIONS_KEY, notifications);
-        }
-
-        document.getElementById("application-reference").textContent = application.id;
-        document.getElementById("application-success-message").textContent = assignedDistributor
-            ? "Your application was routed to " + assignedDistributor.name + " (Distributor ID " +
-                assignedDistributor.generatedId + ") for PIN code " + application.operationalPin +
-                ". A notification is queued for " + assignedDistributor.mobile +
-                " in this browser. Notification delivery is not configured."
-            : application.role === "retailer"
-                ? "No approved Distributor covers PIN code " + application.operationalPin +
-                    ". The application is saved in this browser for the Master Admin (Rahamtulla Mondal) to review."
-                : editingApplicationId
-                    ? "Your corrected application and updated document selections were saved for review in this browser."
-                    : "Your application details have been saved in this browser.";
-        editingApplicationId = null;
-        form.hidden = true;
-        document.querySelector(".role-picker").hidden = true;
-        correctionWorkspace.hidden = true;
-        status.hidden = true;
-        successPanel.hidden = false;
-        successPanel.scrollIntoView({ behavior: "smooth", block: "center" });
     });
-
 }
 
 function initializeDocumentScanner() {
@@ -631,11 +492,16 @@ async function validatePartnerApplication(form, role) {
         return "Enter a valid email address.";
     }
     const fileInputs = Array.from(form.querySelectorAll('input[type="file"]:not(:disabled)'));
+    let totalDocumentBytes = 0;
     for (const input of fileInputs) {
         if (!input.files || input.files.length !== 1) {
             return "Select every required document before submitting.";
         }
         const file = input.files[0];
+        totalDocumentBytes += file.size;
+        if (totalDocumentBytes > 40 * 1024 * 1024) {
+            return "All selected documents together must be 40 MB or smaller.";
+        }
         if (file.size === 0 || file.size > 10 * 1024 * 1024 ||
             !/\.(pdf|jpe?g|png)$/i.test(file.name)) {
             return "Each document must be a non-empty PDF, JPG or PNG file no larger than 10 MB.";
@@ -663,226 +529,152 @@ async function validatePartnerApplication(form, role) {
 
 function initializePortalLogin() {
     const mobileForm = document.getElementById("portal-login-form");
-    if (!mobileForm) {
-        return;
-    }
-
-    const phoneInput = document.getElementById("login-mobile");
+    if (!mobileForm) return;
     const passwordForm = document.getElementById("login-password-form");
     const setupForm = document.getElementById("first-time-setup-form");
     const recoveryForm = document.getElementById("password-recovery-form");
     const operatorSetupForm = document.getElementById("operator-setup-form");
     const retailerActivationForm = document.getElementById("retailer-activation-form");
     const status = document.getElementById("login-status");
-    let selectedStaff = null;
-    let selectedRetailer = null;
+    let selectedAccount = null;
 
     function setStatus(message) {
         status.textContent = message;
         status.hidden = false;
     }
 
-    function showOnly(form) {
-        [mobileForm, passwordForm, setupForm, recoveryForm, operatorSetupForm, retailerActivationForm].forEach(function (item) {
-            item.hidden = item !== form;
-        });
+    function showOnly(target) {
+        [mobileForm, passwordForm, setupForm, recoveryForm, operatorSetupForm, retailerActivationForm]
+            .forEach(function (form) { form.hidden = form !== target; });
         status.hidden = true;
     }
 
-    function findStaff(mobile) {
-        if (mobile === MASTER_ADMIN_MOBILE) {
-            return { mobile: mobile, role: "master", name: "Master Admin" };
-        }
-        const operator = readList(OPERATORS_KEY).find(function (item) {
-            const authorization = findAuthorizedOperator(mobile);
-            return item.mobile === mobile && item.status === "active" &&
-                authorization && normalizeName(item.name) === normalizeName(authorization.name);
-        });
-        return operator ? { mobile: operator.mobile, role: "subadmin", name: operator.name } : null;
-    }
-
-    function setSession(staff, credential) {
-        if (staff.role === "retailer") {
-            sessionStorage.removeItem(PENDING_WELCOME_KEY);
-            sessionStorage.setItem(RETAIL_SESSION_KEY, JSON.stringify({
-                userId: staff.userId,
-                authenticatedAt: Date.now()
-            }));
+    function redirectForUser(user) {
+        if (user.role === "retailer") {
             window.location.assign("retailer.html");
             return;
         }
         sessionStorage.setItem(PENDING_WELCOME_KEY, JSON.stringify({
-            name: staff.name,
-            role: staff.role
+            name: user.name,
+            role: user.role,
         }));
-        sessionStorage.setItem(STAFF_SESSION_KEY, JSON.stringify({
-            role: staff.role,
-            mobile: staff.mobile,
-            name: staff.name,
-            credentialVersion: credential.version,
-            authenticatedAt: Date.now()
-        }));
-        if (staff.role === "subadmin") {
-            sessionStorage.setItem(CURRENT_SUBADMIN_KEY, JSON.stringify({
-                mobile: staff.mobile,
-                name: staff.name,
-                role: staff.role
-            }));
-        } else {
-            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
-        }
         window.location.assign("admin.html");
     }
 
-    mobileForm.addEventListener("submit", function (event) {
+    mobileForm.addEventListener("submit", async function (event) {
         event.preventDefault();
-        const identifier = phoneInput.value.trim();
-        if (/^[A-Za-z]{2,5}\d{4,}$/.test(identifier)) {
-            selectedRetailer = readList(RETAIL_PROFILES_KEY).find(function (profile) {
-                return String(profile.userId).toLocaleLowerCase() === identifier.toLocaleLowerCase();
-            }) || null;
-            if (!selectedRetailer) {
-                setStatus("That Retail ID was not found. Check the ID or contact the Master Admin.");
-                return;
-            }
-            selectedStaff = {
-                mobile: selectedRetailer.mobile,
-                role: "retailer",
-                name: selectedRetailer.name,
-                userId: selectedRetailer.userId
-            };
-            if (!selectedRetailer.isPasswordSet || !selectedRetailer.passwordHash) {
+        const identifier = document.getElementById("login-mobile").value.trim();
+        if (!/^\d{10,15}$/.test(identifier) && !/^[A-Za-z]{2,5}\d{4,}$/.test(identifier)) {
+            setStatus("Enter a valid mobile number or official Retail ID.");
+            return;
+        }
+        try {
+            selectedAccount = await apiRequest("/api/auth/lookup", {
+                method: "POST",
+                body: { identifier: identifier },
+            });
+            document.getElementById("login-account-label").textContent =
+                selectedAccount.role === "retailer"
+                    ? "Sign in to Retail ID " + selectedAccount.identifier + "."
+                    : "Sign in to " + selectedAccount.name + " account.";
+            if (selectedAccount.role === "retailer" && !selectedAccount.passwordSet) {
                 retailerActivationForm.reset();
-                document.getElementById("retail-activation-mobile").value = "";
                 showOnly(retailerActivationForm);
                 document.getElementById("retail-activation-mobile").focus();
-            } else {
-                document.getElementById("login-name-field").hidden = true;
-                document.getElementById("forgot-password").hidden = true;
-                document.getElementById("login-account-label").textContent =
-                    "Sign in to Retail ID " + selectedRetailer.userId + ".";
-                document.getElementById("login-password").value = "";
-                showOnly(passwordForm);
-                document.getElementById("login-password").focus();
-            }
-            return;
-        }
-        const mobile = identifier;
-        if (!/^\d{10,15}$/.test(mobile)) {
-            setStatus("Enter a valid mobile number using digits only.");
-            phoneInput.focus();
-            return;
-        }
-
-        selectedStaff = findStaff(mobile);
-        if (selectedStaff) {
-            selectedRetailer = null;
-            document.getElementById("forgot-password").hidden = false;
-            const credential = findCredential(mobile);
-            if (credential) {
-                const nameInput = document.getElementById("login-name");
-                nameInput.required = selectedStaff.role === "subadmin";
-                nameInput.value = "";
-                document.getElementById("login-name-field").hidden = selectedStaff.role !== "subadmin";
-                document.getElementById("login-account-label").textContent = "Sign in to " + selectedStaff.name + " account.";
-                document.getElementById("login-password").value = "";
-                showOnly(passwordForm);
-                (selectedStaff.role === "subadmin" ? nameInput : document.getElementById("login-password")).focus();
-            } else {
-                document.getElementById("setup-title").textContent = selectedStaff.role === "master"
-                    ? "Create Master Admin password"
-                    : "Create Sub-Admin password";
-                const nameField = document.getElementById("setup-name-field");
-                nameField.hidden = selectedStaff.role !== "subadmin";
-                document.getElementById("setup-name").required = selectedStaff.role === "subadmin";
-                if (selectedStaff.role === "subadmin") {
-                    document.getElementById("setup-name").value = selectedStaff.name;
+            } else if (!selectedAccount.passwordSet) {
+                document.getElementById("setup-title").textContent = "Create your " +
+                    (selectedAccount.role === "master" ? "Master Admin"
+                        : selectedAccount.role === "distributor" ? "Distributor"
+                            : "Sub-Admin") + " password";
+                document.getElementById("setup-name-field").hidden = selectedAccount.role !== "subadmin";
+                document.getElementById("setup-name").required = selectedAccount.role === "subadmin";
+                document.getElementById("setup-name").value = selectedAccount.role === "subadmin"
+                    ? selectedAccount.name : "";
+                const bootstrap = document.getElementById("bootstrap-token-field");
+                if (bootstrap) {
+                    bootstrap.hidden = selectedAccount.role !== "master";
+                    document.getElementById("bootstrap-token").required = selectedAccount.role === "master";
+                }
+                const activation = document.getElementById("activation-token-field");
+                if (activation) {
+                    activation.hidden = selectedAccount.role === "master";
+                    document.getElementById("activation-token").required = selectedAccount.role !== "master";
                 }
                 showOnly(setupForm);
                 document.getElementById("setup-password").focus();
+            } else {
+                const isSubAdmin = selectedAccount.role === "subadmin";
+                document.getElementById("login-name-field").hidden = !isSubAdmin;
+                document.getElementById("login-name").required = isSubAdmin;
+                document.getElementById("forgot-password").hidden = false;
+                document.getElementById("login-password").value = "";
+                showOnly(passwordForm);
+                document.getElementById(isSubAdmin ? "login-name" : "login-password").focus();
             }
-            return;
+        } catch (error) {
+            if (identifier === MASTER_ADMIN_MOBILE && /could not be verified/i.test(error.message)) {
+                selectedAccount = { identifier: identifier, role: "master", name: "Master Admin", canSetup: true };
+                document.getElementById("setup-title").textContent = "Create Master Admin password";
+                document.getElementById("setup-name-field").hidden = true;
+                document.getElementById("setup-name").required = false;
+                const bootstrap = document.getElementById("bootstrap-token-field");
+                if (bootstrap) {
+                    bootstrap.hidden = false;
+                    document.getElementById("bootstrap-token").required = true;
+                }
+                const activation = document.getElementById("activation-token-field");
+                if (activation) {
+                    activation.hidden = true;
+                    document.getElementById("activation-token").required = false;
+                }
+                showOnly(setupForm);
+                document.getElementById("setup-password").focus();
+                return;
+            }
+            if (/could not be verified/i.test(error.message)) {
+                document.getElementById("operator-mobile").value = identifier;
+                document.getElementById("operator-name").value = "";
+                showOnly(operatorSetupForm);
+                document.getElementById("operator-name").focus();
+                return;
+            }
+            setStatus(error.message);
         }
-
-        const operatorExists = readList(OPERATORS_KEY).some(function (item) {
-            return item.mobile === mobile;
-        });
-        if (operatorExists) {
-            setStatus("This Sub-Admin account is not active. Contact the Master Admin.");
-            return;
-        }
-        const authorization = findAuthorizedOperator(mobile);
-        if (!authorization) {
-            setStatus("This mobile number is not authorized for Sub-Admin access. Contact the Master Admin.");
-            return;
-        }
-        const priorRequest = readList(OPERATOR_REQUESTS_KEY).find(function (item) {
-            return item.mobile === mobile;
-        });
-        if (priorRequest && priorRequest.status === "rejected") {
-            setStatus("This Sub-Admin request was rejected. Contact the Master Admin.");
-            return;
-        }
-        if (priorRequest && priorRequest.status === "pending") {
-            setStatus("Sub-Admin setup is awaiting Master Admin approval. This mobile number cannot be changed for that request.");
-            return;
-        }
-
-        document.getElementById("operator-mobile").value = mobile;
-        document.getElementById("operator-name").value = "";
-        showOnly(operatorSetupForm);
-        document.getElementById("operator-name").focus();
     });
 
     setupForm.addEventListener("submit", async function (event) {
         event.preventDefault();
-        if (!selectedStaff || !setupForm.reportValidity()) {
-            return;
-        }
+        if (!selectedAccount || !setupForm.reportValidity()) return;
         const password = document.getElementById("setup-password").value;
-        const passwordConfirm = document.getElementById("setup-password-confirm").value;
+        const confirm = document.getElementById("setup-password-confirm").value;
         const recovery = document.getElementById("setup-recovery").value;
-        const recoveryConfirm = document.getElementById("setup-recovery-confirm").value;
-        if (selectedStaff.role === "subadmin" &&
-            normalizeName(document.getElementById("setup-name").value) !== normalizeName(selectedStaff.name)) {
-            setStatus("The name does not match the Master Admin's authorized Sub-Admin record.");
+        if (validatePassword(password)) {
+            setStatus(validatePassword(password));
             return;
         }
-        const passwordError = validatePassword(password);
-        if (passwordError) {
-            setStatus(passwordError);
+        if (password !== confirm || recovery.length < 12 ||
+            recovery !== document.getElementById("setup-recovery-confirm").value) {
+            setStatus("Passwords must match, and the recovery phrase must match and contain at least 12 characters.");
             return;
         }
-        if (password !== passwordConfirm) {
-            setStatus("The passwords do not match.");
+        const name = selectedAccount.role === "subadmin"
+            ? document.getElementById("setup-name").value.trim() : selectedAccount.name;
+        if (selectedAccount.role === "subadmin" && normalizeName(name) !== normalizeName(selectedAccount.name)) {
+            setStatus("The name does not match the authorized Sub-Admin record.");
             return;
         }
-        if (recovery.trim().length < 12 || recovery.length > 256 || recovery !== recoveryConfirm) {
-            setStatus("Enter the same recovery phrase in both fields. It must be at least 12 characters.");
-            return;
-        }
-        if (findCredential(selectedStaff.mobile)) {
-            setStatus("A password is already set for this account. Sign in or use Forgot password.");
-            return;
-        }
-
+        const payload = {
+            identifier: selectedAccount.identifier,
+            name: name,
+            password: password,
+            recovery: recovery,
+            bootstrapToken: document.getElementById("bootstrap-token")?.value || "",
+            activationToken: document.getElementById("activation-token")?.value || "",
+        };
         try {
-            const credential = {
-                mobile: selectedStaff.mobile,
-                role: selectedStaff.role,
-                name: selectedStaff.role === "subadmin"
-                    ? selectedStaff.name
-                    : "Master Admin",
-                password: await hashSecret(password),
-                recovery: await hashSecret(recovery),
-                version: createReference("AUTH"),
-                updatedAt: new Date().toISOString()
-            };
-            const credentials = readList(CREDENTIALS_KEY);
-            credentials.push(credential);
-            writeList(CREDENTIALS_KEY, credentials);
-            selectedStaff.name = credential.name;
-            setSession(selectedStaff, credential);
+            const route = selectedAccount.role === "master" ? "/api/auth/bootstrap" : "/api/auth/setup";
+            const result = await apiRequest(route, { method: "POST", body: payload });
+            redirectForUser(result.user);
         } catch (error) {
             setStatus(error.message);
         }
@@ -890,96 +682,57 @@ function initializePortalLogin() {
 
     passwordForm.addEventListener("submit", async function (event) {
         event.preventDefault();
-        if (!selectedStaff || !passwordForm.reportValidity()) {
+        if (!selectedAccount || !passwordForm.reportValidity()) return;
+        const payload = {
+            identifier: selectedAccount.identifier,
+            password: document.getElementById("login-password").value,
+            name: document.getElementById("login-name").value.trim(),
+        };
+        if (selectedAccount.role === "subadmin" &&
+            normalizeName(payload.name) !== normalizeName(selectedAccount.name)) {
+            setStatus("The name and mobile number do not match the authorized Sub-Admin account.");
             return;
         }
         try {
-            if (selectedStaff.role === "retailer") {
-                const currentProfile = readList(RETAIL_PROFILES_KEY).find(function (profile) {
-                    return String(profile.userId).toLocaleLowerCase() ===
-                        String(selectedStaff.userId).toLocaleLowerCase();
-                });
-                if (!currentProfile || !currentProfile.isPasswordSet ||
-                    !currentProfile.passwordHash ||
-                    !(await verifySecret(document.getElementById("login-password").value, currentProfile.passwordHash))) {
-                    setStatus("Retail ID or password is incorrect.");
-                    document.getElementById("login-password").value = "";
-                    document.getElementById("login-password").focus();
-                    return;
-                }
-                selectedRetailer = currentProfile;
-                setSession(selectedStaff, null);
-                return;
-            }
-            const credential = findCredential(selectedStaff.mobile);
-            const submittedName = document.getElementById("login-name").value;
-            if (selectedStaff.role === "subadmin" &&
-                normalizeName(submittedName) !== normalizeName(selectedStaff.name)) {
-                setStatus("The name, mobile number and authorized Sub-Admin account do not match.");
-                document.getElementById("login-name").focus();
-                return;
-            }
-            if (!credential || !(await verifySecret(document.getElementById("login-password").value, credential.password))) {
-                setStatus("Mobile number or password is incorrect.");
-                document.getElementById("login-password").value = "";
-                document.getElementById("login-password").focus();
-                return;
-            }
-            if (selectedStaff.role === "subadmin" &&
-                normalizeName(credential.name) !== normalizeName(selectedStaff.name)) {
-                setStatus("The name, mobile number and authorized Sub-Admin account do not match.");
-                document.getElementById("login-password").value = "";
-                document.getElementById("login-name").focus();
-                return;
-            }
-            selectedStaff.name = credential.name;
-            setSession(selectedStaff, credential);
+            const result = await apiRequest("/api/auth/login", { method: "POST", body: payload });
+            redirectForUser(result.user);
         } catch (error) {
             setStatus(error.message);
+            document.getElementById("login-password").value = "";
+            document.getElementById("login-password").focus();
         }
     });
 
     retailerActivationForm.addEventListener("submit", async function (event) {
         event.preventDefault();
-        if (!selectedRetailer || !retailerActivationForm.reportValidity()) {
-            return;
-        }
-        const mobile = document.getElementById("retail-activation-mobile").value.trim();
+        if (!selectedAccount || !retailerActivationForm.reportValidity()) return;
         const password = document.getElementById("retail-activation-password").value;
-        if (mobile !== selectedRetailer.mobile) {
-            setStatus("The mobile number does not match this Retail ID's registered profile.");
-            return;
-        }
-        const passwordError = validatePassword(password);
-        if (passwordError) {
-            setStatus(passwordError);
+        if (validatePassword(password)) {
+            setStatus(validatePassword(password));
             return;
         }
         if (password !== document.getElementById("retail-activation-password-confirm").value) {
             setStatus("The passwords do not match.");
             return;
         }
+        const recovery = document.getElementById("retail-activation-recovery").value;
+        if (recovery.length < 12 ||
+            recovery !== document.getElementById("retail-activation-recovery-confirm").value) {
+            setStatus("The recovery phrase must match and contain at least 12 characters.");
+            return;
+        }
         try {
-            const profiles = readList(RETAIL_PROFILES_KEY);
-            const profile = profiles.find(function (item) {
-                return String(item.userId).toLocaleLowerCase() ===
-                    String(selectedRetailer.userId).toLocaleLowerCase();
+            const result = await apiRequest("/api/retailer/activate", {
+                method: "POST",
+                body: {
+                    identifier: selectedAccount.identifier,
+                    name: document.getElementById("retail-activation-mobile").value.trim(),
+                    password: password,
+                    recovery: recovery,
+                    activationToken: document.getElementById("retail-activation-token").value.trim(),
+                },
             });
-            if (!profile || profile.isPasswordSet || profile.mobile !== mobile) {
-                setStatus("This Retail ID has already been activated or its profile changed. Sign in or contact the Master Admin.");
-                return;
-            }
-            profile.passwordHash = await hashSecret(password);
-            profile.isPasswordSet = true;
-            profile.passwordSetAt = new Date().toISOString();
-            writeList(RETAIL_PROFILES_KEY, profiles);
-            selectedRetailer = profile;
-            setSession({
-                role: "retailer",
-                mobile: profile.mobile,
-                name: profile.name,
-                userId: profile.userId
-            }, null);
+            redirectForUser(result.user);
         } catch (error) {
             setStatus(error.message);
         }
@@ -987,138 +740,94 @@ function initializePortalLogin() {
 
     recoveryForm.addEventListener("submit", async function (event) {
         event.preventDefault();
-        if (!recoveryForm.reportValidity()) {
+        if (!recoveryForm.reportValidity()) return;
+        const password = document.getElementById("recovery-password").value;
+        if (validatePassword(password)) {
+            setStatus(validatePassword(password));
             return;
         }
-        const mobile = document.getElementById("recovery-mobile").value.trim();
+        if (password !== document.getElementById("recovery-password-confirm").value) {
+            setStatus("The new passwords do not match.");
+            return;
+        }
         try {
-            const staff = findStaff(mobile);
-            const credential = staff && findCredential(mobile);
-            if (!staff || !credential || !(await verifySecret(document.getElementById("recovery-phrase").value, credential.recovery))) {
-                setStatus("Account or recovery phrase could not be verified.");
-                return;
-            }
-            const password = document.getElementById("recovery-password").value;
-            const passwordError = validatePassword(password);
-            if (passwordError) {
-                setStatus(passwordError);
-                return;
-            }
-            if (password !== document.getElementById("recovery-password-confirm").value) {
-                setStatus("The new passwords do not match.");
-                return;
-            }
-            credential.password = await hashSecret(password);
-            credential.version = createReference("AUTH");
-            credential.updatedAt = new Date().toISOString();
-            writeList(CREDENTIALS_KEY, readList(CREDENTIALS_KEY).map(function (item) {
-                return item.mobile === mobile ? credential : item;
-            }));
-            sessionStorage.removeItem(STAFF_SESSION_KEY);
-            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
-            recoveryForm.reset();
-            selectedStaff = staff;
-            document.getElementById("login-account-label").textContent = "Password reset. Sign in to " + staff.name + ".";
-            showOnly(passwordForm);
-            document.getElementById("login-password").focus();
+            await apiRequest("/api/auth/recover", {
+                method: "POST",
+                body: {
+                    identifier: document.getElementById("recovery-mobile").value.trim(),
+                    recovery: document.getElementById("recovery-phrase").value,
+                    password: password,
+                },
+            });
+            selectedAccount = null;
+            showOnly(mobileForm);
+            document.getElementById("login-mobile").value = "";
+            setStatus("Password updated. Continue with your new password.");
         } catch (error) {
             setStatus(error.message);
         }
     });
 
-    operatorSetupForm.addEventListener("submit", function (event) {
+    operatorSetupForm.addEventListener("submit", async function (event) {
         event.preventDefault();
-        if (!operatorSetupForm.reportValidity()) {
-            return;
+        if (!operatorSetupForm.reportValidity()) return;
+        try {
+            await apiRequest("/api/auth/operator-request", {
+                method: "POST",
+                body: {
+                    name: document.getElementById("operator-name").value.trim(),
+                    mobile: document.getElementById("operator-mobile").value.trim(),
+                },
+            });
+            showOnly(mobileForm);
+            setStatus("Your Sub-Admin setup request was submitted for Master Admin review.");
+        } catch (error) {
+            setStatus(error.message);
         }
-        const mobile = document.getElementById("operator-mobile").value;
-        const operators = readList(OPERATORS_KEY);
-        const requests = readList(OPERATOR_REQUESTS_KEY);
-        const name = document.getElementById("operator-name").value.trim();
-        const authorization = findAuthorizedOperator(mobile);
-        if (mobile === MASTER_ADMIN_MOBILE || !authorization ||
-            normalizeName(name) !== normalizeName(authorization.name)) {
-            setStatus("The name and mobile number must match an identity authorized by the Master Admin.");
-            return;
-        }
-        if (operators.some(function (item) { return item.mobile === mobile; }) ||
-            requests.some(function (item) { return item.mobile === mobile; })) {
-            setStatus("This number is already assigned or has an enrollment request.");
-            return;
-        }
-        requests.unshift({
-            id: createReference("OPR"),
-            name: authorization.name,
-            mobile: mobile,
-            requestedAt: new Date().toISOString(),
-            status: "pending"
-        });
-        writeList(OPERATOR_REQUESTS_KEY, requests);
-        operatorSetupForm.reset();
-        showOnly(mobileForm);
-        phoneInput.value = "";
-        setStatus("Setup request submitted for Master Admin approval. After approval, the Sub-Admin can create a password and recovery phrase.");
     });
 
     document.getElementById("forgot-password").addEventListener("click", function () {
-        recoveryForm.reset();
-        document.getElementById("recovery-mobile").value = selectedStaff ? selectedStaff.mobile : phoneInput.value.trim();
+        document.getElementById("recovery-mobile").value = selectedAccount
+            ? selectedAccount.mobile || selectedAccount.identifier
+            : document.getElementById("login-mobile").value.trim();
         showOnly(recoveryForm);
         document.getElementById("recovery-phrase").focus();
     });
-
     document.getElementById("cancel-recovery").addEventListener("click", function () {
-        if (selectedStaff && findCredential(selectedStaff.mobile)) {
-            showOnly(passwordForm);
-            document.getElementById("login-password").focus();
-        } else {
+        if (!selectedAccount) {
             showOnly(mobileForm);
-            phoneInput.focus();
+            return;
         }
+        showOnly(passwordForm);
+        document.getElementById("login-password").focus();
     });
-
     document.getElementById("change-number").addEventListener("click", function () {
-        selectedStaff = null;
-        selectedRetailer = null;
+        selectedAccount = null;
         showOnly(mobileForm);
-        phoneInput.focus();
+        document.getElementById("login-mobile").focus();
     });
     document.getElementById("retail-activation-back").addEventListener("click", function () {
-        selectedStaff = null;
-        selectedRetailer = null;
+        selectedAccount = null;
         showOnly(mobileForm);
-        phoneInput.focus();
+        document.getElementById("login-mobile").focus();
     });
 }
 
 function playWelcomeVoice(userName, role) {
-    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance !== "function") {
-        return false;
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
+        return;
     }
-
-    let message;
-    if (role === "master" || role === "admin") {
-        message = `Welcome to your Master Admin Panel, ${userName}.`;
-    } else if (role === "subadmin") {
-        message = `Welcome Sub-admin, ${userName}.`;
-    } else {
-        return false;
-    }
-
-    try {
-        const utterance = new SpeechSynthesisUtterance(message);
-        utterance.rate = 1;
-        utterance.pitch = 1;
-        utterance.lang = "en-US";
-        utterance.onerror = function (event) {
-            console.warn("The welcome voice could not be played:", event.error);
-        };
-        window.speechSynthesis.speak(utterance);
-        return true;
-    } catch (error) {
-        console.warn("The welcome voice could not be started:", error);
-        return false;
-    }
+    const greeting = role === "master"
+        ? "Welcome to your Master Admin Panel, " + userName + "."
+        : role === "distributor"
+            ? "Welcome to your Distributor workspace, " + userName + "."
+            : "Welcome Sub-Admin, " + userName + ".";
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(greeting);
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.lang = "en-US";
+    window.speechSynthesis.speak(utterance);
 }
 
 function initializeOperationsDashboard() {
@@ -1127,66 +836,18 @@ function initializeOperationsDashboard() {
         return;
     }
 
-    const sessionValue = sessionStorage.getItem(STAFF_SESSION_KEY);
     const accessDenied = document.getElementById("dashboard-access-denied");
     const operationsContent = document.getElementById("operations-content");
-    const query = new URLSearchParams(window.location.search);
-    const requestedDistributorId = query.get("distributor");
-    const requestedQueueToken = query.get("access");
-    const distributorMapping = readList(DISTRIBUTOR_PIN_MAPPINGS_KEY).find(function (item) {
-        return item.distributorId === requestedDistributorId &&
-            item.queueAccessToken === requestedQueueToken;
-    });
-    const distributorProfile = distributorMapping && readList(APPLICATIONS_KEY).find(function (item) {
-        return item.id === distributorMapping.distributorApplicationId &&
-            item.role === "distributor" && item.status === "approved" &&
-            item.generatedId === requestedDistributorId;
-    });
-    const isDistributorMode = Boolean(distributorProfile);
-    let staff = null;
-    let credential = null;
-    let isMaster = false;
-    let operator = distributorProfile || null;
-    if (!isDistributorMode) {
-        if (!sessionValue) {
-            accessDenied.hidden = false;
-            return;
-        }
-        try {
-            staff = JSON.parse(sessionValue);
-        } catch (error) {
-            sessionStorage.removeItem(STAFF_SESSION_KEY);
-            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
-            accessDenied.hidden = false;
-            return;
-        }
-        credential = findCredential(staff.mobile);
-        if (!credential || credential.version !== staff.credentialVersion ||
-            !Number.isFinite(staff.authenticatedAt) ||
-            Date.now() - staff.authenticatedAt > STAFF_SESSION_LIFETIME) {
-            sessionStorage.removeItem(STAFF_SESSION_KEY);
-            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
-            accessDenied.hidden = false;
-            return;
-        }
-        isMaster = staff.role === "master" && staff.mobile === MASTER_ADMIN_MOBILE &&
-            credential.role === "master";
-        operator = isMaster
-            ? { name: "Master Admin", mobile: MASTER_ADMIN_MOBILE }
-            : readList(OPERATORS_KEY).find(function (item) {
-                const authorization = findAuthorizedOperator(staff.mobile);
-                return staff.role === "subadmin" && credential.role === "subadmin" &&
-                    item.mobile === staff.mobile && item.status === "active" && authorization &&
-                    normalizeName(item.name) === normalizeName(authorization.name) &&
-                    normalizeName(credential.name) === normalizeName(authorization.name) &&
-                    normalizeName(staff.name) === normalizeName(authorization.name);
-            });
-        if (!operator || (isMaster && staff.mobile !== MASTER_ADMIN_MOBILE)) {
-            sessionStorage.removeItem(STAFF_SESSION_KEY);
-            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
-            accessDenied.hidden = false;
-            return;
-        }
+    const staff = PORTAL_USER;
+    const isDistributorMode = Boolean(staff && staff.role === "distributor");
+    const distributorProfile = isDistributorMode
+        ? readList("rm-demo-distributor-profile")[0] : null;
+    const isMaster = Boolean(staff && staff.role === "master");
+    const operator = distributorProfile || staff;
+    if (!staff || !["master", "subadmin", "distributor"].includes(staff.role) ||
+        (isDistributorMode && !distributorProfile)) {
+        accessDenied.hidden = false;
+        return;
     }
 
     operationsContent.hidden = false;
@@ -1236,41 +897,67 @@ function initializeOperationsDashboard() {
         dashboardStatus.hidden = false;
     }
 
+    async function renderCustomerDocuments() {
+        if (!isMaster) {
+            return;
+        }
+        const container = document.getElementById("customer-document-list");
+        const status = document.getElementById("customer-document-status");
+        container.innerHTML = '<p class="empty-state">Loading customer applications and documents…</p>';
+        status.hidden = true;
+        try {
+            const records = await apiRequest("/api/admin/documents");
+            if (!ensureCurrentOperatorAccess()) return;
+            container.innerHTML = records.length ? records.map(function (application) {
+                const recordLabel = application.formType ||
+                    (application.role === "distributor" ? "Distributor application" : "Retailer application");
+                const referenceLabel = application.recordType === "transaction"
+                    ? "Transaction " + (application.business || application.id)
+                    : "Reference " + application.id;
+                const files = Array.isArray(application.documents) ? application.documents : [];
+                const fileList = files.length ? files.map(function (file) {
+                    return '<li><span><strong>' + escapeHTML(file.label) + '</strong> · ' +
+                        escapeHTML(file.fileName) +
+                        (file.revision ? ' · revision ' + escapeHTML(file.revision) : '') +
+                        ' · ' + formatFileSize(file.size) + '</span><a class="btn quiet" href="' +
+                        escapeHTML(file.downloadUrl) + '" target="_blank" rel="noopener">View / Download Document</a></li>';
+                }).join("") : '<li>No uploaded documents are available for this submission.</li>';
+                return '<article class="application-card customer-document-card"><div class="application-details">' +
+                    '<span class="application-type">' + escapeHTML(recordLabel) + ' · ' +
+                    escapeHTML(application.status) + '</span><h3>' + escapeHTML(application.name) + '</h3>' +
+                    '<p>' + escapeHTML(application.mobile) + ' · ' + escapeHTML(application.email || "No email") +
+                    '</p><p>' + escapeHTML(application.business || "") + '</p>' +
+                    '<small>' + escapeHTML(referenceLabel) + ' · Submitted ' +
+                    escapeHTML(formatDateTime(application.submittedAt)) + '</small>' +
+                    '<ul class="customer-document-list">' + fileList + '</ul></div></article>';
+            }).join("") : '<p class="empty-state">No customer applications have been submitted.</p>';
+        } catch (error) {
+            status.textContent = error.message || "Customer applications could not be loaded.";
+            status.hidden = false;
+            container.innerHTML = "";
+        }
+    }
+
+    document.addEventListener("click", async function (event) {
+        const button = event.target.closest("[data-issue-setup-code]");
+        if (!button || !isMaster) return;
+        button.disabled = true;
+        try {
+            const result = await apiRequest(
+                "/api/admin/accounts/" + encodeURIComponent(button.dataset.issueSetupCode) + "/setup-code",
+                { method: "POST", body: {} }
+            );
+            setDashboardStatus("One-time setup code for " + result.identifier + " (" + result.mobile +
+                "): " + result.code + ". Share it only through a separately verified channel; it expires in 7 days.");
+        } catch (error) {
+            setDashboardStatus(error.message);
+        } finally {
+            button.disabled = false;
+        }
+    });
+
     function ensureCurrentOperatorAccess() {
-        if (isDistributorMode) {
-            const currentMapping = readList(DISTRIBUTOR_PIN_MAPPINGS_KEY).find(function (item) {
-                return item.distributorId === requestedDistributorId &&
-                    item.queueAccessToken === requestedQueueToken &&
-                    item.distributorApplicationId === distributorProfile.id;
-            });
-            const currentProfile = readList(APPLICATIONS_KEY).find(function (item) {
-                return item.id === distributorProfile.id && item.role === "distributor" &&
-                    item.status === "approved" && item.generatedId === requestedDistributorId;
-            });
-            if (currentMapping && currentProfile) {
-                return true;
-            }
-            operationsContent.hidden = true;
-            accessDenied.hidden = false;
-            return false;
-        }
-        if (isMaster) {
-            return true;
-        }
-        const authorization = findAuthorizedOperator(staff.mobile);
-        const activeOperator = readList(OPERATORS_KEY).find(function (item) {
-            return item.mobile === staff.mobile && item.status === "active";
-        });
-        const currentCredential = findCredential(staff.mobile);
-        const allowed = authorization && activeOperator &&
-            normalizeName(authorization.name) === normalizeName(activeOperator.name) &&
-            normalizeName(authorization.name) === normalizeName(staff.name) &&
-            currentCredential && currentCredential.version === staff.credentialVersion &&
-            currentCredential.role === "subadmin" &&
-            normalizeName(currentCredential.name) === normalizeName(authorization.name);
-        if (!allowed) {
-            sessionStorage.removeItem(STAFF_SESSION_KEY);
-            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
+        if (!PORTAL_USER) {
             operationsContent.hidden = true;
             accessDenied.hidden = false;
             return false;
@@ -1302,8 +989,8 @@ function initializeOperationsDashboard() {
                 ? queuedNotifications.length + " new application notification" +
                     (queuedNotifications.length === 1 ? "" : "s") + " for Distributor ID " +
                     distributorProfile.generatedId + " (" + distributorProfile.mobile +
-                    "). Notifications are stored locally; delivery is not configured."
-                : "No new application notifications. Notification delivery is not configured.";
+                    "). Sign in to review the assigned queue."
+                : "No new application notifications.";
             notificationStatus.hidden = false;
         } else {
             notificationStatus.hidden = true;
@@ -1322,9 +1009,10 @@ function initializeOperationsDashboard() {
         applicationList.innerHTML = visible.map(function (application) {
             const roleName = application.role === "distributor" ? "Distributor" : "Retailer";
             const documentList = Array.isArray(application.documents) ? application.documents : [];
-            const documentSummary = documentList.map(function (item) {
-                return escapeHTML(item.label) + " (" + escapeHTML(item.fileName) + ")";
-            }).join(", ");
+            const documentSummary = isMaster && documentList.length
+                ? '<p class="document-summary"><strong>Documents:</strong> ' +
+                    documentList.length + ' attached; see Customer Documents / Applications below.</p>'
+                : "";
             const rejected = application.status === "rejected";
             const pending = application.status === "pending";
             const blocked = application.status === "blocked" || blockedMobiles.includes(application.mobile);
@@ -1355,8 +1043,8 @@ function initializeOperationsDashboard() {
                     (blocked ? '<span class="status-pill pending">Number blocked</span>'
                         : '<button type="button" class="btn danger" data-application-action="block" data-application-id="' +
                             escapeHTML(application.id) + '">Block number</button>') +
-                    '<button type="button" class="btn quiet" data-application-action="delete" data-application-id="' +
-                        escapeHTML(application.id) + '">Delete record</button></div>';
+                    (isMaster ? '<button type="button" class="btn quiet" data-application-action="delete" data-application-id="' +
+                        escapeHTML(application.id) + '">Delete record</button>' : "") + '</div>';
             return '<article class="application-card">' +
                 '<div class="application-details"><span class="application-type">' + roleName + ' · ' + statusLabel + '</span>' +
                 '<h3>' + escapeHTML(application.name) + '</h3>' +
@@ -1371,7 +1059,11 @@ function initializeOperationsDashboard() {
                 '<p class="application-contact">' + escapeHTML(application.mobile || "") + ' · ' + escapeHTML(application.email || "") + '</p>' +
                 '<small>Reference ' + escapeHTML(application.id) + ' · Submitted ' + formatDate(application.submittedAt) +
                 ' · Revision ' + escapeHTML(application.revision || 1) + '</small>' +
-                '<p class="document-summary"><strong>Selected documents (not uploaded):</strong> ' + (documentSummary || "None recorded") + '</p>' +
+                documentSummary +
+                (isMaster && application.status === "approved"
+                    ? '<button class="btn quiet" type="button" data-issue-setup-code="' +
+                        escapeHTML(application.generatedId || application.mobile) + '">Issue / reissue setup code</button>'
+                    : "") +
                 (rejected ? decision : "") + '</div>' + '<div class="application-decisions">' +
                     (pending && !blocked ? decision : pending
                         ? '<p class="application-final-status">This number is blocked; no approval is available.</p>'
@@ -1470,15 +1162,14 @@ function initializeOperationsDashboard() {
             const mapping = mappings.find(function (item) {
                 return item.distributorApplicationId === distributor.id;
             });
-            const queueUrl = mapping && mapping.queueAccessToken
-                ? new URL("admin.html?distributor=" + encodeURIComponent(distributor.generatedId) +
-                    "&access=" + encodeURIComponent(mapping.queueAccessToken), window.location.href).toString()
-                : "";
+            const queueUrl = new URL("login.html", window.location.href).toString();
             return '<article class="application-card distributor-mapping-card">' +
                 '<div class="application-details"><span class="application-type">Approved Distributor</span>' +
                 '<h3>' + escapeHTML(distributor.name) + '</h3><p>' + escapeHTML(distributor.business || "") +
                 ' · ID <strong>' + escapeHTML(distributor.generatedId) + '</strong></p>' +
-                '<p class="application-contact">' + escapeHTML(distributor.mobile) + '</p></div>' +
+                '<p class="application-contact">' + escapeHTML(distributor.mobile) + '</p>' +
+                '<button class="btn quiet" type="button" data-issue-setup-code="' +
+                    escapeHTML(distributor.generatedId || distributor.mobile) + '">Issue / reissue setup code</button></div>' +
                 '<form class="distributor-mapping-form" data-distributor-application-id="' + escapeHTML(distributor.id) + '">' +
                 '<div class="field"><label for="pins-' + escapeHTML(distributor.id) + '">Service PIN codes</label>' +
                 '<input id="pins-' + escapeHTML(distributor.id) + '" name="pins" value="' +
@@ -1492,9 +1183,8 @@ function initializeOperationsDashboard() {
                 '<input id="region-' + escapeHTML(distributor.id) + '" name="region" value="' +
                 escapeHTML(mapping && mapping.region || "") + '" maxlength="120" placeholder="City / district / region"></div>' +
                 '<button class="btn primary" type="submit">Save PIN mapping</button>' +
-                (queueUrl ? '<p class="distributor-queue-link"><strong>Distributor queue link</strong><br><a class="text-link" href="' +
-                    escapeHTML(queueUrl) + '" target="_blank" rel="noopener noreferrer">Open Distributor queue</a>' +
-                    '<br><small>This browser-generated link does not authenticate its user. Do not use it as a production access link.</small></p>' : "") +
+                '<p class="distributor-queue-link"><strong>Distributor access</strong><br><a class="text-link" href="' +
+                    escapeHTML(queueUrl) + '">Sign in to the Distributor portal</a></p>' +
                 '</form></article>';
         }).join("");
     }
@@ -1504,7 +1194,9 @@ function initializeOperationsDashboard() {
             return;
         }
         const profiles = readList(RETAIL_PROFILES_KEY);
-        document.getElementById("master-contact-email").value = readMasterContact().email;
+        const contact = readMasterContact();
+        document.getElementById("master-contact-email").value = contact.email;
+        document.getElementById("master-contact-mobile").value = contact.mobile;
         const container = document.getElementById("retailer-profile-list");
         container.innerHTML = profiles.length ? profiles.map(function (profile) {
             return '<article class="approval-card"><div><span class="status-pill ' +
@@ -1512,7 +1204,10 @@ function initializeOperationsDashboard() {
                 (profile.isPasswordSet ? "Activated" : "First login pending") +
                 '</span><p><strong>' + escapeHTML(profile.userId) + '</strong> · ' +
                 escapeHTML(profile.name) + '</p><small>' + escapeHTML(profile.mobile) +
-                ' · ' + escapeHTML(profile.email) + '</small></div></article>';
+                ' · ' + escapeHTML(profile.email) + '</small>' +
+                (!profile.isPasswordSet ? '<p><button class="btn quiet" type="button" data-issue-setup-code="' +
+                    escapeHTML(profile.userId) + '">Issue / reissue setup code</button></p>' : "") +
+                '</div></article>';
         }).join("") : '<p class="empty-state">No pre-created Retailer profiles have been added yet.</p>';
     }
 
@@ -1597,16 +1292,6 @@ function initializeOperationsDashboard() {
             distributorMapping = distributorMappings.find(function (item) {
                 return item.distributorApplicationId === application.id;
             }) || { distributorApplicationId: application.id, createdAt: new Date().toISOString() };
-            if (!distributorMapping.queueAccessToken) {
-                try {
-                    distributorMapping.queueAccessToken = createDistributorQueueToken();
-                } catch (error) {
-                    setDashboardStatus(error.message);
-                    document.getElementById("approval-password-panel").hidden = true;
-                    pendingApproval = null;
-                    return;
-                }
-            }
             distributorMapping.distributorId = generatedId;
             distributorMapping.distributorMobile = application.mobile;
             distributorMapping.distributorName = application.name;
@@ -1630,12 +1315,13 @@ function initializeOperationsDashboard() {
         }
         updateDistributorNotifications(applicationId, "approved");
         renderApplications();
+        renderCustomerDocuments();
         renderDistributorMappings();
         document.getElementById("approval-password-panel").hidden = true;
         pendingApproval = null;
         setDashboardStatus("Application approved. The " + (application.role === "distributor" ? "Distributor" : "Retailer") +
-            " ID is " + generatedId + ". Notification delivery is not configured." +
-            (distributorMapping ? " Service PINs are active and the Distributor queue link is ready." : ""));
+            " ID is " + generatedId + ". The partner can complete first-time setup and sign in to the authenticated portal." +
+            (distributorMapping ? " Service PINs are active and the Distributor account can review its routed queue." : ""));
     }
 
     function finishApplicationRejection(applicationId, reason) {
@@ -1648,6 +1334,7 @@ function initializeOperationsDashboard() {
             document.getElementById("approval-password-panel").hidden = true;
             setDashboardStatus("This application is no longer pending. The queue has been refreshed.");
             renderApplications();
+            renderCustomerDocuments();
             return;
         }
         application.status = "rejected";
@@ -1805,14 +1492,13 @@ function initializeOperationsDashboard() {
             return;
         }
         try {
-            const currentCredential = findCredential(operator.mobile);
-            const validPassword = currentCredential &&
-                currentCredential.version === staff.credentialVersion &&
-                await verifySecret(document.getElementById("approval-password").value, currentCredential.password);
-            if (!validPassword) {
-                setDashboardStatus("Password verification failed. No application action was completed.");
-                return;
-            }
+            await apiRequest("/api/auth/verify-password", {
+                method: "POST",
+                body: {
+                    identifier: PORTAL_USER.mobile,
+                    password: document.getElementById("approval-password").value,
+                },
+            });
             if (pendingApproval.action === "reject") {
                 finishApplicationRejection(pendingApproval.applicationId, pendingApproval.reason);
             } else if (pendingApproval.action === "approve") {
@@ -1916,9 +1602,6 @@ function initializeOperationsDashboard() {
             writeList(OPERATORS_KEY, readList(OPERATORS_KEY).filter(function (item) {
                 return item.mobile !== mobile;
             }));
-            writeList(CREDENTIALS_KEY, readList(CREDENTIALS_KEY).filter(function (item) {
-                return item.mobile !== mobile;
-            }));
             writeList(OPERATOR_REQUESTS_KEY, readList(OPERATOR_REQUESTS_KEY).filter(function (item) {
                 return item.mobile !== mobile;
             }));
@@ -1944,7 +1627,7 @@ function initializeOperationsDashboard() {
         renderOperatorRequests();
     });
 
-    document.getElementById("operator-whitelist-list").addEventListener("click", function (event) {
+    document.getElementById("operator-whitelist-list").addEventListener("click", async function (event) {
         const button = event.target.closest("[data-whitelist-action]");
         if (!button || !isMaster) {
             return;
@@ -1960,7 +1643,7 @@ function initializeOperationsDashboard() {
         const action = button.dataset.whitelistAction;
         const operators = readList(OPERATORS_KEY);
         const requests = readList(OPERATOR_REQUESTS_KEY);
-        const credentials = readList(CREDENTIALS_KEY);
+        let requestsToSave = null;
         if (action === "hold") {
             identity.status = "held";
             operators.forEach(function (item) {
@@ -1972,7 +1655,6 @@ function initializeOperationsDashboard() {
             operators.forEach(function (item) {
                 if (item.mobile === mobile) item.status = "banned";
             });
-            writeList(CREDENTIALS_KEY, credentials.filter(function (item) { return item.mobile !== mobile; }));
         } else if (action === "reset") {
             identity.status = "active";
             delete identity.bannedAt;
@@ -1980,28 +1662,61 @@ function initializeOperationsDashboard() {
             operators.forEach(function (item) {
                 if (item.mobile === mobile) item.status = "active";
             });
-            writeList(OPERATOR_REQUESTS_KEY, requests.filter(function (item) { return item.mobile !== mobile; }));
-            writeList(CREDENTIALS_KEY, credentials.filter(function (item) { return item.mobile !== mobile; }));
+            requestsToSave = requests.filter(function (item) {
+                return item.mobile !== mobile;
+            });
         } else if (action === "delete") {
-            writeList(OPERATOR_WHITELIST_KEY, whitelist.filter(function (item) { return item.id !== identity.id; }));
-            writeList(OPERATORS_KEY, operators.filter(function (item) { return item.mobile !== mobile; }));
-            writeList(OPERATOR_REQUESTS_KEY, requests.filter(function (item) { return item.mobile !== mobile; }));
-            writeList(CREDENTIALS_KEY, credentials.filter(function (item) { return item.mobile !== mobile; }));
+            const whitelistSave = await writeList(
+                OPERATOR_WHITELIST_KEY,
+                whitelist.filter(function (item) { return item.id !== identity.id; })
+            );
+            const operatorSave = await writeList(
+                OPERATORS_KEY,
+                operators.filter(function (item) { return item.mobile !== mobile; })
+            );
+            const requestSave = await writeList(
+                OPERATOR_REQUESTS_KEY,
+                requests.filter(function (item) { return item.mobile !== mobile; })
+            );
+            if (whitelistSave === null || operatorSave === null || requestSave === null) {
+                setDashboardStatus("The Sub-Admin records could not all be deleted. Review server status before retrying.");
+                return;
+            }
             renderOperatorWhitelist();
             renderOperatorRequests();
-            setDashboardStatus("Sub-Admin authorization, account, requests and credentials deleted. The mobile number can now be added again from scratch.");
+            setDashboardStatus("Sub-Admin authorization, account and requests deleted. The mobile number can now be added again from scratch.");
             return;
         }
         identity.updatedAt = new Date().toISOString();
-        writeList(OPERATOR_WHITELIST_KEY, whitelist);
-        writeList(OPERATORS_KEY, operators);
+        const whitelistSave = await writeList(OPERATOR_WHITELIST_KEY, whitelist);
+        const operatorSave = await writeList(OPERATORS_KEY, operators);
+        const requestSave = requestsToSave
+            ? await writeList(OPERATOR_REQUESTS_KEY, requestsToSave)
+            : null;
+        if (whitelistSave === null || operatorSave === null ||
+            (action === "reset" && requestSave === null)) {
+            setDashboardStatus("The Sub-Admin lifecycle change could not be fully saved. Review server status before retrying.");
+            return;
+        }
+        if (action === "reset") {
+            try {
+                const reset = await apiRequest(
+                    "/api/admin/accounts/" + encodeURIComponent(mobile) + "/reset",
+                    { method: "POST", body: {} }
+                );
+                setDashboardStatus("Password reset. One-time setup code for " + reset.identifier + ": " +
+                    reset.code + ". Share only through a separately verified channel; expires in 7 days.");
+            } catch (error) {
+                setDashboardStatus(error.message);
+            }
+        }
         renderOperatorWhitelist();
         renderOperatorRequests();
-        setDashboardStatus(action === "hold"
-            ? "Sub-Admin placed on hold. Access and approvals are paused until reset/reactivation."
-            : action === "ban"
-                ? "Sub-Admin permanently banned. The number cannot re-register until the Master Admin resets or deletes the record."
-                : "Sub-Admin state reset and reactivated. Old requests and credentials were cleared; a fresh password setup is required.");
+        if (action === "hold") {
+            setDashboardStatus("Sub-Admin placed on hold. Access and approvals are paused until reset/reactivation.");
+        } else if (action === "ban") {
+            setDashboardStatus("Sub-Admin permanently banned. The number cannot re-register until the Master Admin resets or deletes the record.");
+        }
     });
 
     document.getElementById("distributor-mapping-list").addEventListener("submit", function (event) {
@@ -2055,15 +1770,6 @@ function initializeOperationsDashboard() {
         if (!mapping) {
             mapping = { distributorApplicationId: profile.id, createdAt: new Date().toISOString() };
             mappings.push(mapping);
-        }
-        if (!mapping.queueAccessToken) {
-            try {
-                mapping.queueAccessToken = createDistributorQueueToken();
-            } catch (error) {
-                status.textContent = error.message;
-                status.hidden = false;
-                return;
-            }
         }
         mapping.distributorId = profile.generatedId;
         mapping.distributorMobile = profile.mobile;
@@ -2193,36 +1899,41 @@ function initializeOperationsDashboard() {
             : "Master Admin rejected the critical-change request.");
     });
 
-    document.getElementById("staff-signout").addEventListener("click", function () {
-        sessionStorage.removeItem(STAFF_SESSION_KEY);
-        sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
-        window.location.assign("login.html");
+    document.getElementById("staff-signout").addEventListener("click", async function () {
+        try {
+            await apiRequest("/api/auth/logout", { method: "POST", body: {} });
+            window.location.assign("login.html");
+        } catch (error) {
+            setDashboardStatus(error.message);
+        }
     });
 
-    window.addEventListener("storage", function (event) {
-        if ([APPLICATIONS_KEY, BLOCKED_PARTNER_MOBILES_KEY, DISTRIBUTOR_PIN_MAPPINGS_KEY,
-            DISTRIBUTOR_NOTIFICATIONS_KEY, OPERATORS_KEY, OPERATOR_REQUESTS_KEY,
-            OPERATOR_WHITELIST_KEY, MASTER_APPROVALS_KEY, CREDENTIALS_KEY,
-            RETAIL_PROFILES_KEY, MASTER_CONTACT_KEY, UPLINE_REQUESTS_KEY,
-            SERVICE_REQUESTS_KEY].includes(event.key)) {
-            if (isDistributorMode && !ensureCurrentOperatorAccess()) {
-                return;
-            }
-            if ([OPERATORS_KEY, OPERATOR_WHITELIST_KEY, CREDENTIALS_KEY].includes(event.key) &&
-                !ensureCurrentOperatorAccess()) {
-                return;
-            }
+    window.addEventListener("focus", async function () {
+        try {
+            const result = await apiRequest("/api/portal/state");
+            PORTAL_USER = result.user;
+            PORTAL_STATE = result.state;
+            if (!ensureCurrentOperatorAccess()) return;
             renderApplications();
+            renderCustomerDocuments();
             renderDistributorMappings();
             renderOperatorRequests();
             renderOperatorWhitelist();
             renderCriticalRequests();
             renderRetailerProfiles();
             renderUplineRequests();
+        } catch (error) {
+            if (/sign in|session has expired|not active/i.test(error.message)) {
+                operationsContent.hidden = true;
+                accessDenied.hidden = false;
+            } else {
+                setDashboardStatus(error.message);
+            }
         }
     });
 
     renderApplications();
+    renderCustomerDocuments();
     renderDistributorMappings();
     renderOperatorRequests();
     renderOperatorWhitelist();
@@ -2233,64 +1944,46 @@ function initializeOperationsDashboard() {
 
 function initializeRetailerDashboard() {
     const content = document.getElementById("retailer-profile-content");
-    if (!content) {
-        return;
-    }
+    if (!content) return;
     const denied = document.getElementById("retailer-access-denied");
-    let retailerSession;
-    try {
-        retailerSession = JSON.parse(sessionStorage.getItem(RETAIL_SESSION_KEY) || "null");
-    } catch (error) {
-        sessionStorage.removeItem(RETAIL_SESSION_KEY);
-    }
-    if (!retailerSession || !retailerSession.userId ||
-        !Number.isFinite(retailerSession.authenticatedAt) ||
-        Date.now() - retailerSession.authenticatedAt > STAFF_SESSION_LIFETIME) {
-        sessionStorage.removeItem(RETAIL_SESSION_KEY);
+    if (!PORTAL_RETAILER || !PORTAL_USER || PORTAL_USER.role !== "retailer") {
         denied.hidden = false;
         return;
     }
-    const profile = readList(RETAIL_PROFILES_KEY).find(function (item) {
-        return String(item.userId).toLocaleLowerCase() ===
-            String(retailerSession.userId).toLocaleLowerCase() && item.isPasswordSet;
-    });
-    if (!profile) {
-        sessionStorage.removeItem(RETAIL_SESSION_KEY);
-        denied.hidden = false;
-        return;
-    }
+    const profile = PORTAL_RETAILER.profile;
+    const upline = PORTAL_RETAILER.upline;
     content.hidden = false;
     document.getElementById("retailer-welcome").textContent = "Welcome, " + profile.name;
     document.getElementById("retailer-profile-id").textContent = profile.userId;
     document.getElementById("retailer-profile-name").textContent = profile.name;
     document.getElementById("retailer-profile-mobile").textContent = profile.mobile;
-    document.getElementById("retailer-profile-email").textContent = profile.email;
-    document.getElementById("upline-email").textContent = readMasterContact().email || "Not configured";
+    document.getElementById("retailer-profile-email").textContent = profile.email || "Not configured";
+    document.querySelector("#retailer-profile-content .profile-card:nth-child(2) dd").textContent =
+        upline.name || "RAHAMTULLA MONDAL";
+    document.querySelector("#retailer-profile-content .profile-card:nth-child(2) dl div:nth-child(2) dd").textContent =
+        upline.mobile || MASTER_ADMIN_MOBILE;
+    document.getElementById("upline-email").textContent = upline.email || "Not configured";
     const status = document.getElementById("retailer-profile-status");
-    document.getElementById("change-upline-request").addEventListener("click", function () {
-        const requests = readList(UPLINE_REQUESTS_KEY);
-        if (requests.some(function (request) {
-            return request.userId === profile.userId && request.status === "pending";
-        })) {
-            status.textContent = "A Change Upline request is already waiting for Master Admin review.";
+    document.getElementById("change-upline-request").addEventListener("click", async function () {
+        try {
+            await apiRequest("/api/retailer/upline-request", {
+                method: "POST",
+                body: { reason: "" },
+            });
+            status.textContent = "Your Change Upline request was sent to the Master Admin for review.";
             status.hidden = false;
-            return;
+        } catch (error) {
+            status.textContent = error.message;
+            status.hidden = false;
         }
-        requests.unshift({
-            id: createReference("UPL"),
-            userId: profile.userId,
-            name: profile.name,
-            mobile: profile.mobile,
-            requestedAt: new Date().toISOString(),
-            status: "pending"
-        });
-        writeList(UPLINE_REQUESTS_KEY, requests);
-        status.textContent = "Your Change Upline request has been sent to the Master Admin for review.";
-        status.hidden = false;
     });
-    document.getElementById("retailer-signout").addEventListener("click", function () {
-        sessionStorage.removeItem(RETAIL_SESSION_KEY);
-        window.location.assign("login.html");
+    document.getElementById("retailer-signout").addEventListener("click", async function () {
+        try {
+            await apiRequest("/api/auth/logout", { method: "POST", body: {} });
+            window.location.assign("login.html");
+        } catch (error) {
+            reportApiFailure(error);
+        }
     });
 }
 
@@ -2302,7 +1995,7 @@ function initializeServiceRequests() {
                 document.getElementById("service-request-type").value = link.dataset.serviceChoice;
             });
         });
-        form.addEventListener("submit", function (event) {
+        form.addEventListener("submit", async function (event) {
             event.preventDefault();
             const status = document.getElementById("service-request-status");
             if (!form.reportValidity()) {
@@ -2315,20 +2008,23 @@ function initializeServiceRequests() {
                 status.hidden = false;
                 return;
             }
-            const requests = readList(SERVICE_REQUESTS_KEY);
-            requests.unshift({
-                id: createReference("SRV"),
+            try {
+                await apiRequest("/api/service-enquiries", {
+                    method: "POST",
+                    body: {
                 name: String(data.get("name")).trim(),
                 mobile: mobile,
                 service: String(data.get("service")).trim(),
                 message: String(data.get("message") || "").trim(),
-                requestedAt: new Date().toISOString(),
-                status: "pending"
-            });
-            writeList(SERVICE_REQUESTS_KEY, requests);
-            form.reset();
-            status.textContent = "Your enquiry was saved in this browser. It was not delivered to our team.";
-            status.hidden = false;
+                    },
+                });
+                form.reset();
+                status.textContent = "Your service enquiry has been securely sent to our operations team.";
+                status.hidden = false;
+            } catch (error) {
+                status.textContent = error.message;
+                status.hidden = false;
+            }
         });
     }
 
@@ -2439,39 +2135,21 @@ function initializePwa() {
 }
 
 function readList(key) {
-    const value = localStorage.getItem(key);
-    if (value === null) {
-        return [];
-    }
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed)) {
-        throw new Error("Stored portal data for " + key + " is invalid. Clear the portal data and reload.");
-    }
-    return parsed;
+    const value = PORTAL_STATE[key];
+    return Array.isArray(value) ? JSON.parse(JSON.stringify(value)) : [];
 }
 
 function readMasterContact() {
-    const value = localStorage.getItem(MASTER_CONTACT_KEY);
-    if (value === null) {
-        return { name: "RAHAMTULLA MONDAL", mobile: MASTER_ADMIN_MOBILE, email: "" };
-    }
-    const contact = JSON.parse(value);
+    const contact = (PORTAL_STATE[MASTER_CONTACT_KEY] || [])[0] ||
+        { name: "RAHAMTULLA MONDAL", mobile: MASTER_ADMIN_MOBILE, email: "" };
     if (!contact || typeof contact !== "object" || typeof contact.email !== "string") {
-        throw new Error("Stored Master Distributor contact details are invalid. Update them from the Master Admin dashboard.");
+        throw new Error("Master Distributor contact details are invalid. Update them from the Master Admin dashboard.");
     }
     return contact;
 }
 
 function writeMasterContact(contact) {
-    localStorage.setItem(MASTER_CONTACT_KEY, JSON.stringify(contact));
-}
-
-function isPartnerMobileBlocked(mobile) {
-    return readList(BLOCKED_PARTNER_MOBILES_KEY).some(function (item) {
-        return item.mobile === mobile;
-    }) || readList(APPLICATIONS_KEY).some(function (item) {
-        return item.mobile === mobile && normalizeApplicationStatus(item) === "blocked";
-    });
+    writeList(MASTER_CONTACT_KEY, [contact]);
 }
 
 function normalizeApplicationStatus(application) {
@@ -2508,24 +2186,35 @@ function findDistributorForPin(pin) {
     } : null;
 }
 
-function createDistributorQueueToken() {
-    if (!window.crypto || typeof window.crypto.getRandomValues !== "function") {
-        throw new Error("Secure random generation is unavailable; the Distributor queue link was not created.");
-    }
-    const bytes = window.crypto.getRandomValues(new Uint8Array(24));
-    return Array.from(bytes).map(function (byte) {
-        return byte.toString(16).padStart(2, "0");
-    }).join("");
-}
-
 function writeList(key, value) {
-    localStorage.setItem(key, JSON.stringify(value));
-}
-
-function findCredential(mobile) {
-    return readList(CREDENTIALS_KEY).find(function (item) {
-        return item.mobile === mobile;
-    }) || null;
+    if (!Array.isArray(value)) {
+        throw new Error("Portal collections must be arrays.");
+    }
+    PORTAL_STATE[key] = JSON.parse(JSON.stringify(value));
+    const previous = PORTAL_WRITE_QUEUES.get(key) || Promise.resolve();
+    const next = previous.then(function () {
+        return apiRequest("/api/portal/state/" + encodeURIComponent(key), {
+            method: "PUT",
+            body: { value: PORTAL_STATE[key] },
+        });
+    }).then(function (result) {
+        if (result.setupCodes && result.setupCodes.length) {
+            const status = document.getElementById("dashboard-status");
+            if (status) {
+                status.textContent = "One-time account setup code(s) — share through a separately verified channel: " +
+                    result.setupCodes.map(function (item) {
+                        return item.identifier + " (" + item.mobile + "): " + item.code;
+                    }).join(" · ");
+                status.hidden = false;
+            }
+        }
+        return result;
+    }).catch(function (error) {
+        reportApiFailure(error);
+        return null;
+    });
+    PORTAL_WRITE_QUEUES.set(key, next);
+    return next;
 }
 
 function findAuthorizedOperator(mobile) {
@@ -2536,61 +2225,6 @@ function findAuthorizedOperator(mobile) {
 
 function normalizeName(name) {
     return String(name || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
-}
-
-async function hashSecret(secret) {
-    if (secret.length > 256) {
-        throw new Error("Secret must not exceed 256 characters.");
-    }
-    if (!window.isSecureContext || !window.crypto || !window.crypto.subtle) {
-        throw new Error("Password protection requires a secure browser context with Web Crypto support. Open this site on localhost or HTTPS.");
-    }
-    const salt = window.crypto.getRandomValues(new Uint8Array(16));
-    const key = await window.crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(secret),
-        "PBKDF2",
-        false,
-        ["deriveBits"]
-    );
-    const bits = await window.crypto.subtle.deriveBits({
-        name: "PBKDF2",
-        salt: salt,
-        iterations: PASSWORD_ITERATIONS,
-        hash: "SHA-256"
-    }, key, 256);
-    return {
-        algorithm: "PBKDF2-SHA-256",
-        iterations: PASSWORD_ITERATIONS,
-        salt: bytesToBase64(salt),
-        hash: bytesToBase64(new Uint8Array(bits))
-    };
-}
-
-async function verifySecret(secret, stored) {
-    if (!stored || stored.algorithm !== "PBKDF2-SHA-256" ||
-        !Number.isInteger(stored.iterations) || stored.iterations < 100000 ||
-        stored.iterations > PASSWORD_ITERATIONS) {
-        return false;
-    }
-    if (!window.isSecureContext || !window.crypto || !window.crypto.subtle) {
-        throw new Error("Password verification requires a secure browser context with Web Crypto support.");
-    }
-    const salt = base64ToBytes(stored.salt);
-    const key = await window.crypto.subtle.importKey(
-        "raw",
-        new TextEncoder().encode(secret),
-        "PBKDF2",
-        false,
-        ["deriveBits"]
-    );
-    const bits = await window.crypto.subtle.deriveBits({
-        name: "PBKDF2",
-        salt: salt,
-        iterations: stored.iterations,
-        hash: "SHA-256"
-    }, key, 256);
-    return constantTimeEqual(bytesToBase64(new Uint8Array(bits)), stored.hash);
 }
 
 function validatePassword(password) {
@@ -2605,32 +2239,6 @@ function validatePassword(password) {
         return "Include at least one uppercase letter, lowercase letter, number and symbol.";
     }
     return "";
-}
-
-function bytesToBase64(bytes) {
-    let binary = "";
-    bytes.forEach(function (byte) {
-        binary += String.fromCharCode(byte);
-    });
-    return btoa(binary);
-}
-
-function base64ToBytes(value) {
-    const binary = atob(value);
-    return Uint8Array.from(binary, function (character) {
-        return character.charCodeAt(0);
-    });
-}
-
-function constantTimeEqual(left, right) {
-    if (typeof right !== "string" || left.length !== right.length) {
-        return false;
-    }
-    let difference = 0;
-    for (let index = 0; index < left.length; index += 1) {
-        difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
-    }
-    return difference === 0;
 }
 
 function createReference(prefix) {
@@ -2653,4 +2261,19 @@ function escapeHTML(value) {
 function formatDate(value) {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "recently" : date.toLocaleDateString();
+}
+
+function formatDateTime(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "time unavailable" : date.toLocaleString();
+}
+
+function formatFileSize(bytes) {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value < 0) {
+        return "size unavailable";
+    }
+    return value < 1024 * 1024
+        ? Math.max(1, Math.round(value / 1024)) + " KB"
+        : (value / (1024 * 1024)).toFixed(1) + " MB";
 }

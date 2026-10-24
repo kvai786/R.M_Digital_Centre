@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
@@ -12,11 +13,13 @@
             "name": "Run R.M Digital Centre portal",
             "type": "debugpy",
             "request": "launch",
-            "module": "http.server",
+            "module": "uvicorn",
             "args": [
-                "8000",
-                "--bind",
-                "127.0.0.1"
+                "ocr_server:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000"
             ],
             "console": "integratedTerminal",
             "justMyCode": true
