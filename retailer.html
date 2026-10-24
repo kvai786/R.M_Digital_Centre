@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="description" content="Retailer profile and upline details for R.M Digital Centre.">
+    <title>Retailer profile | R.M Digital Centre</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body data-page="retailer">
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="navbar">
+        <a class="logo" href="index.html" aria-label="R.M Digital Centre home">
+            <img src="icon.svg" alt="" aria-hidden="true">
+            <span><strong>R.M</strong><small>Digital Centre</small></span>
+        </a>
+        <nav aria-label="Main navigation"><a href="index.html">Home</a><button class="text-button retailer-signout" id="retailer-signout" type="button">Sign out</button></nav>
+    </header>
+    <main id="main-content" class="dashboard-page">
+        <section class="form-card" id="retailer-access-denied" hidden>
+            <p class="eyebrow">RETAILER ACCESS</p><h1>Sign in to view your profile</h1>
+            <p class="form-intro">Your Retailer session is missing or expired.</p><a class="btn primary" href="login.html">Go to login</a>
+        </section>
+        <div id="retailer-profile-content" hidden>
+            <div class="dashboard-heading"><div><p class="eyebrow">OFFICIAL PARTNER PROFILE</p><h1 id="retailer-welcome">Retailer profile</h1><p>Review the contact details recorded for your Retail ID and your Master Distributor upline.</p></div></div>
+            <section class="profile-grid" aria-label="Retailer profile details">
+                <article class="profile-card"><p class="eyebrow">RETAILER DETAILS</p><dl>
+                    <div><dt>Retail ID</dt><dd id="retailer-profile-id"></dd></div>
+                    <div><dt>Name</dt><dd id="retailer-profile-name"></dd></div>
+                    <div><dt>Mobile number</dt><dd id="retailer-profile-mobile"></dd></div>
+                    <div><dt>Email address</dt><dd id="retailer-profile-email"></dd></div>
+                </dl></article>
+                <article class="profile-card"><p class="eyebrow">UPLINE DETAILS</p><dl>
+                    <div><dt>Master Distributor</dt><dd>RAHAMTULLA MONDAL</dd></div>
+                    <div><dt>Mobile number</dt><dd>8509010483</dd></div>
+                    <div><dt>Email address</dt><dd id="upline-email">Not configured</dd></div>
+                </dl><button class="btn secondary" type="button" id="change-upline-request">Request Upline change</button></article>
+            </section>
+            <p class="form-status" id="retailer-profile-status" role="status" aria-live="polite" hidden></p>
+            <p class="data-handling-note">For account or profile changes, contact support using an independently verified channel. Never share your password, OTP, Aadhaar number, or banking PIN.</p>
+        </div>
+    </main>
+    <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. Partner profile.</p></footer>
+    <script src="app.js"></script>
+</body>
+</html>

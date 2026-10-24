@@ -6,13 +6,18 @@
     <meta name="theme-color" content="#0f172a">
     <meta name="description" content="R.M Digital Centre offers AEPS, Micro ATM, money transfer, bill payment and retailer and distributor opportunities.">
     <title>R.M Digital Centre | Fintech services</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <meta name="google-site-verification" content="-Kmm1eTXnaqbEEtFJbpIHOcXhAlm7w8hzNXnBMmOpPU" />
 </head>
 <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="navbar">
-        <a class="logo" href="index.html">R.M <span>Digital Centre</span></a>
+        <a class="logo" href="index.html" aria-label="R.M Digital Centre home">
+            <img src="icon.svg" alt="" aria-hidden="true">
+            <span><strong>R.M</strong><small>Digital Centre</small></span>
+        </a>
         <nav aria-label="Main navigation">
             <a href="#services">Services</a>
             <a href="#opportunities">Partner with us</a>
@@ -22,6 +27,61 @@
 
     <main id="main-content">
         <section class="hero">
+            <div class="hero-vfx" aria-hidden="true">
+                <svg class="hero-vfx-art" viewBox="0 0 1200 480" preserveAspectRatio="xMidYMid slice" focusable="false">
+                    <defs>
+                        <radialGradient id="vfx-glow">
+                            <stop offset="0" stop-color="#22d3ee" stop-opacity=".48"/>
+                            <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+                        </radialGradient>
+                        <linearGradient id="vfx-shield" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0" stop-color="#fff0b3" stop-opacity=".94"/>
+                            <stop offset=".46" stop-color="#e7b94f" stop-opacity=".62"/>
+                            <stop offset="1" stop-color="#a97520" stop-opacity=".84"/>
+                        </linearGradient>
+                        <linearGradient id="vfx-cyan" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0" stop-color="#7df9ff"/>
+                            <stop offset="1" stop-color="#08a6dc"/>
+                        </linearGradient>
+                        <linearGradient id="vfx-monogram" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0" stop-color="#fff0b3"/>
+                            <stop offset=".48" stop-color="#e7b94f"/>
+                            <stop offset=".49" stop-color="#7df9ff"/>
+                            <stop offset="1" stop-color="#08a6dc"/>
+                        </linearGradient>
+                        <linearGradient id="vfx-mark" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0" stop-color="#fff"/>
+                            <stop offset="1" stop-color="#a5f3fc"/>
+                        </linearGradient>
+                        <filter id="vfx-soft-glow" x="-80%" y="-80%" width="260%" height="260%">
+                            <feGaussianBlur stdDeviation="12"/>
+                        </filter>
+                    </defs>
+                    <circle cx="330" cy="224" r="178" fill="url(#vfx-glow)" filter="url(#vfx-soft-glow)"/>
+                    <g class="vfx-orbit vfx-orbit-outer">
+                        <ellipse cx="330" cy="222" rx="244" ry="92" fill="none" stroke="#67e8f9" stroke-opacity=".42" stroke-width="1.4" transform="rotate(-25 330 222)"/>
+                    </g>
+                    <g class="vfx-orbit vfx-orbit-inner">
+                        <ellipse cx="330" cy="222" rx="205" ry="73" fill="none" stroke="#38bdf8" stroke-opacity=".34" stroke-width="1" transform="rotate(28 330 222)"/>
+                    </g>
+                    <g class="vfx-particles" fill="#a5f3fc">
+                        <circle cx="97" cy="136" r="2.2"/><circle cx="142" cy="338" r="1.5"/>
+                        <circle cx="213" cy="88" r="1.7"/><circle cx="451" cy="105" r="2"/>
+                        <circle cx="520" cy="269" r="1.6"/><circle cx="426" cy="372" r="2.1"/>
+                        <circle cx="270" cy="389" r="1.4"/><circle cx="533" cy="178" r="1.3"/>
+                        <circle cx="181" cy="249" r="1.3"/><circle cx="379" cy="64" r="1.5"/>
+                    </g>
+                    <g class="vfx-shield">
+                        <path d="M330 88 428 124v91c0 75-39 125-98 158-59-33-98-83-98-158v-91z" fill="#06b6d4" fill-opacity=".12" stroke="#e7b94f" stroke-opacity=".35" stroke-width="15" filter="url(#vfx-soft-glow)"/>
+                        <path class="vfx-shield-rim" d="M330 94 422 128v87c0 70-36 116-92 148-56-32-92-78-92-148v-87z" fill="url(#vfx-shield)" fill-opacity=".2" stroke="url(#vfx-shield)" stroke-opacity=".9" stroke-width="2.4"/>
+                        <path d="M330 116 401 143v72c0 55-27 93-71 120-44-27-71-65-71-120v-72z" fill="#0f172a" fill-opacity=".72" stroke="url(#vfx-cyan)" stroke-opacity=".72" stroke-width="1.5"/>
+                        <text x="330" y="226" fill="url(#vfx-monogram)" font-family="Segoe UI, Arial, sans-serif" font-size="66" font-weight="800" letter-spacing="-5" text-anchor="middle">RM</text>
+                        <path d="M291 245h78" stroke="url(#vfx-shield)" stroke-linecap="round" stroke-width="2"/>
+                        <text x="330" y="273" fill="url(#vfx-mark)" font-family="Segoe UI, Arial, sans-serif" font-size="11" font-weight="800" letter-spacing="2" text-anchor="middle">R.M DIGITAL</text>
+                        <text x="330" y="292" fill="#bae6fd" font-family="Segoe UI, Arial, sans-serif" font-size="8" font-weight="700" letter-spacing="3" text-anchor="middle">CENTRE</text>
+                    </g>
+                </svg>
+            </div>
             <div class="hero-content">
                 <p class="eyebrow">YOUR LOCAL DIGITAL SERVICES PARTNER</p>
                 <h1>Everyday financial services, closer to your community.</h1>
@@ -30,7 +90,8 @@
                     <a href="register.html" class="btn primary">Become a partner</a>
                     <a href="#services" class="btn secondary">Explore services</a>
                 </div>
-                <p class="demo-notice">Portal preview: browser-only authentication and application records are for demonstration only; production use requires server-side security.</p>
+                <button class="install-app-button" id="install-app-button" type="button" hidden>Install app</button>
+                <p class="install-app-status form-status" id="install-app-status" role="status" aria-live="polite" hidden></p>
             </div>
         </section>
 
@@ -45,37 +106,81 @@
                         <span class="service-tag">ASSISTED BANKING</span>
                     </div>
                     <h3>AEPS</h3>
-                    <p>Aadhaar Enabled Payment System services for eligible biometric and Aadhaar-authenticated banking transactions.</p>
+                    <p>Aadhaar Enabled Payment System services for eligible biometric and Aadhaar-authenticated banking transactions. Use only a certified Registered Device (RD) service and authorized provider.</p>
                     <div class="subservice-grid" aria-label="AEPS services">
                         <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7h18v13H3zM3 10h18M7 15h4M7 4h10"/></svg></span><h4>Cash withdrawal</h4><p>Withdraw cash using eligible Aadhaar-linked accounts.</p></article>
                         <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></svg></span><h4>Balance enquiry</h4><p>Check available account balance through assisted service.</p></article>
                         <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6zM9 7h6M9 11h6M9 15h6M9 19h3"/></svg></span><h4>Mini statement</h4><p>View recent account transactions in a mini statement.</p></article>
                         <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg></span><h4>Aadhaar Pay</h4><p>Accept eligible Aadhaar-authenticated customer payments.</p></article>
                     </div>
+                    <a class="service-card-link" href="#service-request" data-service-choice="AEPS / RD device information">Ask about AEPS</a>
                 </article>
                 <article class="service-card">
                     <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 3h16v18H4zM8 7h8M8 11h2M14 11h2M8 15h2M14 15h2M8 19h8"/></svg></span><span class="service-tag">CASH ACCESS</span></div>
                     <h3>Micro ATM</h3>
                     <p>Provide assisted card-based banking and cash access using an authorized Micro ATM device.</p>
+                    <a class="service-card-link" href="#service-request" data-service-choice="Micro ATM / money transfer">Ask about Micro ATM</a>
                 </article>
                 <article class="service-card">
                     <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h5M16 4l3 3"/></svg></span><span class="service-tag">TRANSFERS</span></div>
-                    <h3>Domestic Money Transfer</h3><p>Help customers make domestic money transfers through an assisted service point, subject to provider availability.</p>
+                    <h3>Domestic Money Transfer</h3><p>Help customers make domestic money transfers through an assisted service point, subject to provider availability.</p><a class="service-card-link" href="#service-request" data-service-choice="Micro ATM / money transfer">Ask about transfers</a>
                 </article>
                 <article class="service-card">
                     <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 21V5l8-3v19M12 9h8v12M7 8h2M7 12h2M7 16h2M15 12h2M15 16h2M2 21h20"/></svg></span><span class="service-tag">EVERYDAY BILLS</span></div>
                     <h3>Utility bill payments</h3><p>Convenient assisted payments for essential household utilities.</p>
                     <ul class="utility-list"><li><span aria-hidden="true">ϟ</span> Electricity bills</li><li><span aria-hidden="true">◉</span> Water bills</li><li><span aria-hidden="true">♨</span> Gas bills &amp; booking</li></ul>
+                    <a class="service-card-link" href="#service-request" data-service-choice="BBPS / bill payment">Ask about bill payments</a>
                 </article>
                 <article class="service-card">
                     <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h3M15 13h1M8 16h8"/></svg></span><span class="service-tag">BILLING NETWORK</span></div>
-                    <h3>BBPS &amp; Recharges</h3><p>Offer Bharat BillPay services and mobile or DTH recharges from one local outlet.</p>
+                    <h3>BBPS &amp; Recharges</h3><p>Offer Bharat BillPay services and mobile or DTH recharges from one local outlet.</p><a class="service-card-link" href="#service-request" data-service-choice="BBPS / bill payment">Ask about BBPS</a>
                 </article>
                 <article class="service-card">
                     <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M8 16h3M16 13v5M13.5 15.5H18.5"/></svg></span><span class="service-tag">REPAYMENTS</span></div>
-                    <h3>Loan repayments</h3><p>Help customers make eligible loan repayments at a nearby assisted service centre.</p>
+                    <h3>Loan repayments</h3><p>Help customers make eligible loan repayments at a nearby assisted service centre.</p><a class="service-card-link" href="#service-request" data-service-choice="Loan repayment support">Ask about repayments</a>
+                </article>
+                <article class="service-card">
+                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true">ID</span><span class="service-tag">IDENTITY SERVICES</span></div>
+                    <h3>PAN card processing</h3><p>Assisted PAN applications and correction requests through authorized service providers.</p><a class="service-card-link" href="#service-request" data-service-choice="PAN card processing">Ask about PAN services</a>
+                </article>
+                <article class="service-card">
+                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true">IN</span><span class="service-tag">GOVERNMENT SERVICES</span></div>
+                    <h3>Local digital services</h3><p>Guidance for eligible schemes and applications such as Krishak Bandhu, Jai Bangla and other state services.</p><a class="service-card-link" href="#service-request" data-service-choice="Krishak Bandhu / Jai Bangla">Ask about government services</a>
+                </article>
+                <article class="service-card">
+                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true">↗</span><span class="service-tag">ASSISTED SUPPORT</span></div>
+                    <h3>Retailer service desk</h3><p>Request onboarding, device and service support from the R.M Digital Centre team.</p><a class="service-card-link" href="#service-request" data-service-choice="Retailer or Distributor support">Contact the service desk</a>
                 </article>
             </div>
+        </section>
+
+        <section class="explainer-section" id="how-it-works" aria-labelledby="explainer-title">
+            <div class="explainer-copy">
+                <p class="eyebrow">BUILT FOR LOCAL ACCESS</p>
+                <h2 id="explainer-title">A clearer path from application to service.</h2>
+                <p>One coordinated network helps partners get started, access tools and support customers with confidence.</p>
+                <a href="register.html" class="btn primary">Start your application</a>
+            </div>
+            <div class="workflow-visual" aria-label="Partner workflow: apply, get reviewed, activate services">
+                <article class="workflow-card workflow-card-main"><span class="workflow-number">01</span><h3>Apply locally</h3><p>Choose Retailer or Distributor and share the required business details.</p></article>
+                <article class="workflow-card"><span class="workflow-number">02</span><h3>Review &amp; map</h3><p>Applications are reviewed and Retailers are routed by service PIN.</p></article>
+                <article class="workflow-card"><span class="workflow-number">03</span><h3>Serve with confidence</h3><p>Access eligible services, follow provider rules and get partner support.</p></article>
+            </div>
+        </section>
+
+        <section class="service-request-section" id="service-request" aria-labelledby="service-request-title">
+            <p class="eyebrow">SERVICE ENQUIRY</p>
+            <h2 id="service-request-title">Tell us what you need.</h2>
+            <p class="section-desc">Choose a service and tell us how we can help. Do not include Aadhaar, banking credentials, OTPs or other sensitive customer data.</p>
+            <form id="service-request-form" class="service-request-form">
+                <div class="field"><label for="service-request-name">Your name</label><input id="service-request-name" name="name" autocomplete="name" minlength="2" maxlength="80" required></div>
+                <div class="field"><label for="service-request-mobile">Mobile number</label><input id="service-request-mobile" name="mobile" type="tel" inputmode="numeric" autocomplete="tel" pattern="[0-9]{10}" maxlength="10" required></div>
+                <div class="field"><label for="service-request-type">Service</label><select id="service-request-type" name="service" required><option value="">Choose a service</option><option>AEPS / RD device information</option><option>BBPS / bill payment</option><option>Micro ATM / money transfer</option><option>Loan repayment support</option><option>PAN card processing</option><option>Krishak Bandhu / Jai Bangla</option><option>Retailer or Distributor support</option></select></div>
+                <div class="field"><label for="service-request-message">How can we help?</label><textarea id="service-request-message" name="message" maxlength="500" rows="3" placeholder="Describe your service enquiry. Do not include sensitive personal or financial details."></textarea></div>
+                <button class="btn primary" type="submit">Send service enquiry</button>
+                <p class="form-status" id="service-request-status" role="status" aria-live="polite" hidden></p>
+            </form>
+            <p class="data-handling-note">Enquiries entered here are stored only in this browser and are not delivered to our team. Do not enter personal or financial information.</p>
         </section>
 
         <section class="opportunities-section" id="opportunities" aria-labelledby="opportunities-title">

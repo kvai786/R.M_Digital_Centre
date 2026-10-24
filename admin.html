@@ -4,14 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#0f172a">
-    <meta name="description" content="Browser-only operations dashboard preview for R.M Digital Centre.">
-    <title>Operations preview | R.M Digital Centre</title>
+    <meta name="description" content="Partner operations workspace for R.M Digital Centre.">
+    <title>Partner operations | R.M Digital Centre</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body data-page="operations">
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="navbar">
-        <a class="logo" href="index.html">R.M <span>Digital Centre</span></a>
+        <a class="logo" href="index.html" aria-label="R.M Digital Centre home">
+            <img src="icon.svg" alt="" aria-hidden="true">
+            <span><strong>R.M</strong><small>Digital Centre</small></span>
+        </a>
         <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="login.html">Partner login</a></nav>
     </header>
     <main id="main-content" class="dashboard-page">
@@ -19,14 +24,13 @@
             <p class="eyebrow">STAFF ACCESS REQUIRED</p>
             <h1>Sign in to continue</h1>
             <p class="form-intro">Access is limited to the Master Admin or an accepted Sub-Admin whose name and mobile still match the Master Admin whitelist.</p>
-            <a class="btn primary" href="login.html">Continue to secure login</a>
+            <a class="btn primary" href="login.html">Continue to sign in</a>
         </section>
         <div id="operations-content" hidden>
         <div class="dashboard-heading">
-            <div><p class="eyebrow">OPERATIONS WORKSPACE PREVIEW</p><h1>Partner application workspace</h1><p>Authorized Master Admins and Sub-Admins can approve, request corrections, permanently block numbers, or delete application records.</p></div>
-            <span class="demo-badge">DEMO — NOT SECURE</span>
+            <div><p class="eyebrow">PARTNER OPERATIONS</p><h1>Partner application workspace</h1><p>Authorized Master Admins and Sub-Admins can approve, request corrections, block numbers, and manage application records.</p></div>
         </div>
-        <div class="security-note dashboard-warning">Browser-only demonstration: credentials, whitelist entries, roles, sessions and application records can be edited or cleared by users; mobile numbers are not verified. Do not use real customer data.</div>
+        <div class="data-handling-note operations-data-note">This workspace stores credentials, access records, applications, and enquiries in this browser. These records are not protected by a server-backed authentication service and are not shared across devices. Do not use it to manage real customer accounts or personal information.</div>
         <section class="operator-controls" aria-labelledby="operator-title">
             <div><h2 id="operator-title">Signed-in operator</h2><p id="operator-caption">Master Admin</p></div>
             <div class="operator-hierarchy"><span>Master Admin</span><span aria-hidden="true">→</span><span>Sub-Admin / Operator</span></div>
@@ -50,8 +54,26 @@
             <p class="form-status" id="whitelist-status" role="status" aria-live="polite" hidden></p>
             <div id="operator-whitelist-list" class="application-list" aria-live="polite"></div>
         </section>
+        <section class="dashboard-section master-only" id="retailer-profiles-section" aria-labelledby="retailer-profiles-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">RETAIL ID ACTIVATION</p><h2 id="retailer-profiles-title">Pre-created Retailer profiles</h2><p class="section-desc">Add the official Retail ID, profile details and registered mobile. The Retailer sets a password once on first login; only a password hash is stored.</p></div></div>
+            <form id="retailer-profile-form" class="whitelist-form retailer-profile-form">
+                <div class="field"><label for="retail-profile-id">Official Retail ID</label><input id="retail-profile-id" name="userId" pattern="[A-Za-z]{2,5}[0-9]{4,}" maxlength="20" placeholder="RTF01465" required></div>
+                <div class="field"><label for="retail-profile-name">Retailer name</label><input id="retail-profile-name" name="name" minlength="2" maxlength="80" required></div>
+                <div class="field"><label for="retail-profile-mobile">Registered mobile</label><input id="retail-profile-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" required></div>
+                <div class="field"><label for="retail-profile-email">Email address</label><input id="retail-profile-email" name="email" type="email" maxlength="254" required></div>
+                <button class="btn primary" type="submit">Add Retailer profile</button>
+            </form>
+            <form id="master-contact-form" class="whitelist-form master-contact-form">
+                <div class="field"><label>Master Distributor name</label><input value="RAHAMTULLA MONDAL" readonly></div>
+                <div class="field"><label>Master Distributor mobile</label><input value="8509010483" readonly></div>
+                <div class="field"><label for="master-contact-email">Master Distributor email</label><input id="master-contact-email" name="email" type="email" maxlength="254" required></div>
+                <button class="btn secondary" type="submit">Save upline contact</button>
+            </form>
+            <p class="form-status" id="retailer-profile-status" role="status" aria-live="polite" hidden></p>
+            <div id="retailer-profile-list" class="application-list" aria-live="polite"></div>
+        </section>
         <section class="dashboard-section master-only" id="distributor-mapping-section" aria-labelledby="distributor-mapping-title" hidden>
-            <div class="section-heading"><div><p class="eyebrow">DISTRIBUTOR TERRITORIES</p><h2 id="distributor-mapping-title">PIN code routing</h2><p class="section-desc">Assign each six-digit service PIN code to one approved Distributor. Retailer applications with matching PIN codes are sent only to that Distributor's queue. Queue access links and notifications in this browser demo are not a substitute for server authentication or SMS.</p></div></div>
+            <div class="section-heading"><div><p class="eyebrow">DISTRIBUTOR TERRITORIES</p><h2 id="distributor-mapping-title">PIN code routing</h2><p class="section-desc">Assign each six-digit service PIN code to one approved Distributor. Matching Retailer applications appear in that Distributor's queue in this browser. Queue links do not authenticate users, and notification delivery is not configured.</p></div></div>
             <div id="distributor-mapping-list" class="application-list" aria-live="polite"></div>
             <p class="form-status" id="distributor-mapping-status" role="status" aria-live="polite" hidden></p>
         </section>
@@ -59,6 +81,14 @@
             <div class="section-heading"><div><p class="eyebrow">SHARED APPLICATION QUEUE</p><h2 id="applications-title">Retailer &amp; Distributor applications</h2><p class="section-desc">Block permanently prevents future submissions from that mobile. Delete removes only the selected application record. Rejection sends the applicant to the correction and re-upload flow.</p></div></div>
             <p class="distributor-notification-status" id="distributor-notification-status" role="status" aria-live="polite" hidden></p>
             <div id="application-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section" aria-labelledby="service-enquiries-title">
+            <div class="section-heading"><div><p class="eyebrow">SERVICE DESK</p><h2 id="service-enquiries-title">Service enquiries</h2><p class="section-desc">Enquiries are stored in this browser and are not delivered to applicants. Never request OTPs, PINs, or banking credentials.</p></div></div>
+            <div id="service-request-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section master-only" id="upline-requests-section" aria-labelledby="upline-requests-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">UPLINE SUPPORT</p><h2 id="upline-requests-title">Change Upline requests</h2></div></div>
+            <div id="upline-request-list" class="application-list" aria-live="polite"></div>
         </section>
         <section class="dashboard-section" id="sensitive-section" aria-labelledby="sensitive-title">
             <div class="section-heading"><div><p class="eyebrow">CONTROLLED ACTIONS</p><h2 id="sensitive-title">System settings &amp; sensitive changes</h2><p class="section-desc">Sub-Admins can request a critical change; only the Master Admin can review and approve it.</p></div></div>
@@ -79,7 +109,7 @@
         <p class="form-status dashboard-status" id="dashboard-status" role="status" aria-live="polite" hidden></p>
         </div>
     </main>
-    <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. Browser-only workflow demonstration.</p></footer>
+    <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. Partner operations workspace.</p></footer>
     <script src="app.js"></script>
 </body>
 </html>

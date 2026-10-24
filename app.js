@@ -11,6 +11,13 @@ const OPERATOR_WHITELIST_KEY = "rm-demo-sub-admin-whitelist";
 const MASTER_APPROVALS_KEY = "rm-demo-approvals";
 const CREDENTIALS_KEY = "rm-demo-staff-credentials";
 const STAFF_SESSION_KEY = "rm-demo-authenticated-staff";
+const CURRENT_SUBADMIN_KEY = "currentSubAdmin";
+const PENDING_WELCOME_KEY = "rm-demo-pending-welcome";
+const RETAIL_PROFILES_KEY = "rm-demo-retail-profiles";
+const RETAIL_SESSION_KEY = "rm-demo-authenticated-retailer";
+const MASTER_CONTACT_KEY = "rm-demo-master-contact";
+const UPLINE_REQUESTS_KEY = "rm-demo-upline-requests";
+const SERVICE_REQUESTS_KEY = "rm-demo-service-requests";
 const PASSWORD_ITERATIONS = 210000;
 const STAFF_SESSION_LIFETIME = 8 * 60 * 60 * 1000;
 const DOCUMENT_SCAN_API_URL = "http://127.0.0.1:8001/api/scan-document";
@@ -25,6 +32,9 @@ document.addEventListener("DOMContentLoaded", function () {
     initializeDocumentScanner();
     initializePortalLogin();
     initializeOperationsDashboard();
+    initializeRetailerDashboard();
+    initializeServiceRequests();
+    initializePwa();
 });
 
 function initializeApplicationForm() {
@@ -46,12 +56,16 @@ function initializeApplicationForm() {
     const correctionWorkspace = document.getElementById("correction-workspace");
     const applicationMobileInput = document.getElementById("applicant-mobile");
     const operationalPinInput = document.getElementById("operational-pin");
+    const distributorPinInput = document.getElementById("distributor-service-pincodes");
     const params = new URLSearchParams(window.location.search);
     let editingApplicationId = null;
 
     function setRole(role) {
         const distributor = role === "distributor";
         roleInput.value = role;
+        document.getElementById("distributor-pin-field").hidden = !distributor;
+        distributorPinInput.disabled = !distributor;
+        distributorPinInput.required = false;
         operationalPinInput.required = !distributor;
         operationalPinInput.disabled = distributor;
         document.getElementById("operational-pin-field").hidden = distributor;
@@ -116,7 +130,7 @@ function initializeApplicationForm() {
             pinRouteStatus.classList.add("matched");
             pinRouteStatus.classList.remove("unmatched");
         } else {
-            pinRouteStatus.textContent = "No approved Distributor is mapped to this PIN code yet.";
+            pinRouteStatus.textContent = "No approved Distributor is mapped yet. The Master Admin will review applications for this PIN.";
             pinRouteStatus.classList.add("unmatched");
             pinRouteStatus.classList.remove("matched");
         }
@@ -162,6 +176,9 @@ function initializeApplicationForm() {
         document.getElementById("address").value = application.address || "";
         document.getElementById("city").value = application.city || "";
         operationalPinInput.value = application.operationalPin || "";
+        distributorPinInput.value = Array.isArray(application.servicePincodes)
+            ? application.servicePincodes.join(", ")
+            : "";
         setRole(application.role === "distributor" ? "distributor" : "retailer");
         operationalPinInput.dispatchEvent(new Event("input", { bubbles: true }));
         document.getElementById("correction-reason").textContent =
@@ -308,6 +325,7 @@ function initializeApplicationForm() {
             }
         }
         let assignedDistributor = null;
+        let servicePincodes = [];
         if (roleInput.value === "retailer") {
             const operationalPin = operationalPinInput.value.trim();
             if (!/^\d{6}$/.test(operationalPin)) {
@@ -317,9 +335,13 @@ function initializeApplicationForm() {
             }
             operationalPinInput.setCustomValidity("");
             assignedDistributor = findDistributorForPin(operationalPin);
-            if (!assignedDistributor) {
-                status.textContent = "No approved Distributor is mapped to PIN code " + operationalPin +
-                    ". Please contact support; your application has not been submitted.";
+        } else {
+            servicePincodes = distributorPinInput.value.split(",").map(function (pin) {
+                return pin.trim();
+            }).filter(Boolean);
+            if (servicePincodes.some(function (pin) { return !/^\d{6}$/.test(pin); }) ||
+                new Set(servicePincodes).size !== servicePincodes.length) {
+                status.textContent = "Enter unique six-digit Distributor service PIN codes, separated by commas.";
                 status.hidden = false;
                 return;
             }
@@ -351,6 +373,7 @@ function initializeApplicationForm() {
             city: String(data.get("city")).trim(),
             role: roleInput.value,
             operationalPin: roleInput.value === "retailer" ? operationalPinInput.value.trim() : "",
+            servicePincodes: roleInput.value === "distributor" ? servicePincodes : [],
             documents: Array.from(form.querySelectorAll('input[type="file"]:not(:disabled)')).map(function (input) {
                 return {
                     label: input.labels && input.labels[0] ? input.labels[0].textContent.trim() : input.name,
@@ -390,7 +413,10 @@ function initializeApplicationForm() {
                 assignedDistributorApplicationId: assignedDistributor ? assignedDistributor.applicationId : "",
                 assignedDistributorId: assignedDistributor ? assignedDistributor.generatedId : "",
                 assignedDistributorMobile: assignedDistributor ? assignedDistributor.mobile : "",
-                routedAt: assignedDistributor ? new Date().toISOString() : ""
+                assignedMasterAdmin: !assignedDistributor,
+                routedAt: assignedDistributor || roleInput.value === "retailer"
+                    ? new Date().toISOString()
+                    : ""
             });
             delete application.rejectionReason;
             delete application.rejectedAt;
@@ -406,24 +432,29 @@ function initializeApplicationForm() {
                 application.assignedDistributorId = assignedDistributor.generatedId;
                 application.assignedDistributorMobile = assignedDistributor.mobile;
                 application.routedAt = new Date().toISOString();
+                application.assignedMasterAdmin = false;
+            } else if (application.role === "retailer") {
+                application.assignedMasterAdmin = true;
+                application.routedAt = new Date().toISOString();
             }
             applications.unshift(application);
         }
         writeList(APPLICATIONS_KEY, applications);
+        if (previousDistributorApplicationId &&
+            (!assignedDistributor || previousDistributorApplicationId !== assignedDistributor.applicationId)) {
+            const notifications = readList(DISTRIBUTOR_NOTIFICATIONS_KEY);
+            notifications.forEach(function (notification) {
+                if (notification.applicationId === application.id &&
+                    notification.distributorApplicationId === previousDistributorApplicationId &&
+                    notification.status === "queued") {
+                    notification.status = "rerouted";
+                    notification.updatedAt = new Date().toISOString();
+                }
+            });
+            writeList(DISTRIBUTOR_NOTIFICATIONS_KEY, notifications);
+        }
         if (assignedDistributor) {
             const notifications = readList(DISTRIBUTOR_NOTIFICATIONS_KEY);
-            if (previousDistributorApplicationId &&
-                previousDistributorApplicationId !== assignedDistributor.applicationId) {
-                notifications.forEach(function (notification) {
-                    if (notification.applicationId === application.id &&
-                        notification.distributorApplicationId === previousDistributorApplicationId &&
-                        notification.status === "queued") {
-                        notification.status = "rerouted";
-                        notification.updatedAt = new Date().toISOString();
-                    }
-                });
-
-            }
             notifications.unshift({
                 id: createReference("NTF"),
                 distributorApplicationId: assignedDistributor.applicationId,
@@ -444,10 +475,13 @@ function initializeApplicationForm() {
             ? "Your application was routed to " + assignedDistributor.name + " (Distributor ID " +
                 assignedDistributor.generatedId + ") for PIN code " + application.operationalPin +
                 ". A notification is queued for " + assignedDistributor.mobile +
-                " in this browser demo; no SMS was sent."
-            : editingApplicationId
-                ? "Your corrected demo application and updated document selections were resubmitted for fresh approval."
-                : "Your demo application is pending review. In a live service, processing typically takes 24–48 hours. You would receive an SMS after a decision.";
+                " in this browser. Notification delivery is not configured."
+            : application.role === "retailer"
+                ? "No approved Distributor covers PIN code " + application.operationalPin +
+                    ". The application is saved in this browser for the Master Admin (Rahamtulla Mondal) to review."
+                : editingApplicationId
+                    ? "Your corrected application and updated document selections were saved for review in this browser."
+                    : "Your application details have been saved in this browser.";
         editingApplicationId = null;
         form.hidden = true;
         document.querySelector(".role-picker").hidden = true;
@@ -638,8 +672,10 @@ function initializePortalLogin() {
     const setupForm = document.getElementById("first-time-setup-form");
     const recoveryForm = document.getElementById("password-recovery-form");
     const operatorSetupForm = document.getElementById("operator-setup-form");
+    const retailerActivationForm = document.getElementById("retailer-activation-form");
     const status = document.getElementById("login-status");
     let selectedStaff = null;
+    let selectedRetailer = null;
 
     function setStatus(message) {
         status.textContent = message;
@@ -647,7 +683,7 @@ function initializePortalLogin() {
     }
 
     function showOnly(form) {
-        [mobileForm, passwordForm, setupForm, recoveryForm, operatorSetupForm].forEach(function (item) {
+        [mobileForm, passwordForm, setupForm, recoveryForm, operatorSetupForm, retailerActivationForm].forEach(function (item) {
             item.hidden = item !== form;
         });
         status.hidden = true;
@@ -666,6 +702,19 @@ function initializePortalLogin() {
     }
 
     function setSession(staff, credential) {
+        if (staff.role === "retailer") {
+            sessionStorage.removeItem(PENDING_WELCOME_KEY);
+            sessionStorage.setItem(RETAIL_SESSION_KEY, JSON.stringify({
+                userId: staff.userId,
+                authenticatedAt: Date.now()
+            }));
+            window.location.assign("retailer.html");
+            return;
+        }
+        sessionStorage.setItem(PENDING_WELCOME_KEY, JSON.stringify({
+            name: staff.name,
+            role: staff.role
+        }));
         sessionStorage.setItem(STAFF_SESSION_KEY, JSON.stringify({
             role: staff.role,
             mobile: staff.mobile,
@@ -673,12 +722,52 @@ function initializePortalLogin() {
             credentialVersion: credential.version,
             authenticatedAt: Date.now()
         }));
+        if (staff.role === "subadmin") {
+            sessionStorage.setItem(CURRENT_SUBADMIN_KEY, JSON.stringify({
+                mobile: staff.mobile,
+                name: staff.name,
+                role: staff.role
+            }));
+        } else {
+            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
+        }
         window.location.assign("admin.html");
     }
 
     mobileForm.addEventListener("submit", function (event) {
         event.preventDefault();
-        const mobile = phoneInput.value.trim();
+        const identifier = phoneInput.value.trim();
+        if (/^[A-Za-z]{2,5}\d{4,}$/.test(identifier)) {
+            selectedRetailer = readList(RETAIL_PROFILES_KEY).find(function (profile) {
+                return String(profile.userId).toLocaleLowerCase() === identifier.toLocaleLowerCase();
+            }) || null;
+            if (!selectedRetailer) {
+                setStatus("That Retail ID was not found. Check the ID or contact the Master Admin.");
+                return;
+            }
+            selectedStaff = {
+                mobile: selectedRetailer.mobile,
+                role: "retailer",
+                name: selectedRetailer.name,
+                userId: selectedRetailer.userId
+            };
+            if (!selectedRetailer.isPasswordSet || !selectedRetailer.passwordHash) {
+                retailerActivationForm.reset();
+                document.getElementById("retail-activation-mobile").value = "";
+                showOnly(retailerActivationForm);
+                document.getElementById("retail-activation-mobile").focus();
+            } else {
+                document.getElementById("login-name-field").hidden = true;
+                document.getElementById("forgot-password").hidden = true;
+                document.getElementById("login-account-label").textContent =
+                    "Sign in to Retail ID " + selectedRetailer.userId + ".";
+                document.getElementById("login-password").value = "";
+                showOnly(passwordForm);
+                document.getElementById("login-password").focus();
+            }
+            return;
+        }
+        const mobile = identifier;
         if (!/^\d{10,15}$/.test(mobile)) {
             setStatus("Enter a valid mobile number using digits only.");
             phoneInput.focus();
@@ -687,6 +776,8 @@ function initializePortalLogin() {
 
         selectedStaff = findStaff(mobile);
         if (selectedStaff) {
+            selectedRetailer = null;
+            document.getElementById("forgot-password").hidden = false;
             const credential = findCredential(mobile);
             if (credential) {
                 const nameInput = document.getElementById("login-name");
@@ -803,6 +894,23 @@ function initializePortalLogin() {
             return;
         }
         try {
+            if (selectedStaff.role === "retailer") {
+                const currentProfile = readList(RETAIL_PROFILES_KEY).find(function (profile) {
+                    return String(profile.userId).toLocaleLowerCase() ===
+                        String(selectedStaff.userId).toLocaleLowerCase();
+                });
+                if (!currentProfile || !currentProfile.isPasswordSet ||
+                    !currentProfile.passwordHash ||
+                    !(await verifySecret(document.getElementById("login-password").value, currentProfile.passwordHash))) {
+                    setStatus("Retail ID or password is incorrect.");
+                    document.getElementById("login-password").value = "";
+                    document.getElementById("login-password").focus();
+                    return;
+                }
+                selectedRetailer = currentProfile;
+                setSession(selectedStaff, null);
+                return;
+            }
             const credential = findCredential(selectedStaff.mobile);
             const submittedName = document.getElementById("login-name").value;
             if (selectedStaff.role === "subadmin" &&
@@ -826,6 +934,52 @@ function initializePortalLogin() {
             }
             selectedStaff.name = credential.name;
             setSession(selectedStaff, credential);
+        } catch (error) {
+            setStatus(error.message);
+        }
+    });
+
+    retailerActivationForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        if (!selectedRetailer || !retailerActivationForm.reportValidity()) {
+            return;
+        }
+        const mobile = document.getElementById("retail-activation-mobile").value.trim();
+        const password = document.getElementById("retail-activation-password").value;
+        if (mobile !== selectedRetailer.mobile) {
+            setStatus("The mobile number does not match this Retail ID's registered profile.");
+            return;
+        }
+        const passwordError = validatePassword(password);
+        if (passwordError) {
+            setStatus(passwordError);
+            return;
+        }
+        if (password !== document.getElementById("retail-activation-password-confirm").value) {
+            setStatus("The passwords do not match.");
+            return;
+        }
+        try {
+            const profiles = readList(RETAIL_PROFILES_KEY);
+            const profile = profiles.find(function (item) {
+                return String(item.userId).toLocaleLowerCase() ===
+                    String(selectedRetailer.userId).toLocaleLowerCase();
+            });
+            if (!profile || profile.isPasswordSet || profile.mobile !== mobile) {
+                setStatus("This Retail ID has already been activated or its profile changed. Sign in or contact the Master Admin.");
+                return;
+            }
+            profile.passwordHash = await hashSecret(password);
+            profile.isPasswordSet = true;
+            profile.passwordSetAt = new Date().toISOString();
+            writeList(RETAIL_PROFILES_KEY, profiles);
+            selectedRetailer = profile;
+            setSession({
+                role: "retailer",
+                mobile: profile.mobile,
+                name: profile.name,
+                userId: profile.userId
+            }, null);
         } catch (error) {
             setStatus(error.message);
         }
@@ -861,6 +1015,7 @@ function initializePortalLogin() {
                 return item.mobile === mobile ? credential : item;
             }));
             sessionStorage.removeItem(STAFF_SESSION_KEY);
+            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
             recoveryForm.reset();
             selectedStaff = staff;
             document.getElementById("login-account-label").textContent = "Password reset. Sign in to " + staff.name + ".";
@@ -924,9 +1079,46 @@ function initializePortalLogin() {
 
     document.getElementById("change-number").addEventListener("click", function () {
         selectedStaff = null;
+        selectedRetailer = null;
         showOnly(mobileForm);
         phoneInput.focus();
     });
+    document.getElementById("retail-activation-back").addEventListener("click", function () {
+        selectedStaff = null;
+        selectedRetailer = null;
+        showOnly(mobileForm);
+        phoneInput.focus();
+    });
+}
+
+function playWelcomeVoice(userName, role) {
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance !== "function") {
+        return false;
+    }
+
+    let message;
+    if (role === "master" || role === "admin") {
+        message = `Welcome to your Master Admin Panel, ${userName}.`;
+    } else if (role === "subadmin") {
+        message = `Welcome Sub-admin, ${userName}.`;
+    } else {
+        return false;
+    }
+
+    try {
+        const utterance = new SpeechSynthesisUtterance(message);
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        utterance.lang = "en-US";
+        utterance.onerror = function (event) {
+            console.warn("The welcome voice could not be played:", event.error);
+        };
+        window.speechSynthesis.speak(utterance);
+        return true;
+    } catch (error) {
+        console.warn("The welcome voice could not be started:", error);
+        return false;
+    }
 }
 
 function initializeOperationsDashboard() {
@@ -964,6 +1156,7 @@ function initializeOperationsDashboard() {
             staff = JSON.parse(sessionValue);
         } catch (error) {
             sessionStorage.removeItem(STAFF_SESSION_KEY);
+            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
             accessDenied.hidden = false;
             return;
         }
@@ -972,6 +1165,7 @@ function initializeOperationsDashboard() {
             !Number.isFinite(staff.authenticatedAt) ||
             Date.now() - staff.authenticatedAt > STAFF_SESSION_LIFETIME) {
             sessionStorage.removeItem(STAFF_SESSION_KEY);
+            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
             accessDenied.hidden = false;
             return;
         }
@@ -989,12 +1183,27 @@ function initializeOperationsDashboard() {
             });
         if (!operator || (isMaster && staff.mobile !== MASTER_ADMIN_MOBILE)) {
             sessionStorage.removeItem(STAFF_SESSION_KEY);
+            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
             accessDenied.hidden = false;
             return;
         }
     }
 
     operationsContent.hidden = false;
+    if (!isDistributorMode) {
+        const pendingWelcome = sessionStorage.getItem(PENDING_WELCOME_KEY);
+        if (pendingWelcome) {
+            sessionStorage.removeItem(PENDING_WELCOME_KEY);
+            try {
+                const welcome = JSON.parse(pendingWelcome);
+                if (welcome.role === staff.role && welcome.name === staff.name) {
+                    playWelcomeVoice(welcome.name, welcome.role);
+                }
+            } catch (error) {
+                console.warn("The pending welcome message could not be read:", error);
+            }
+        }
+    }
     document.getElementById("operator-caption").textContent = operator.name + " · " +
         (isDistributorMode ? "Distributor workspace · " + operator.generatedId
             : isMaster ? "Master Admin — ultimate control"
@@ -1061,6 +1270,7 @@ function initializeOperationsDashboard() {
             normalizeName(currentCredential.name) === normalizeName(authorization.name);
         if (!allowed) {
             sessionStorage.removeItem(STAFF_SESSION_KEY);
+            sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
             operationsContent.hidden = true;
             accessDenied.hidden = false;
             return false;
@@ -1078,7 +1288,9 @@ function initializeOperationsDashboard() {
                 return application.assignedDistributorApplicationId === distributorProfile.id;
             })
             : applications.filter(function (application) {
-                return application.role !== "retailer" || !application.assignedDistributorApplicationId;
+                return application.role !== "retailer" ||
+                    (!application.assignedDistributorApplicationId &&
+                        (isMaster || application.assignedMasterAdmin !== true));
             });
         const notificationStatus = document.getElementById("distributor-notification-status");
         if (isDistributorMode) {
@@ -1090,8 +1302,8 @@ function initializeOperationsDashboard() {
                 ? queuedNotifications.length + " new application notification" +
                     (queuedNotifications.length === 1 ? "" : "s") + " for Distributor ID " +
                     distributorProfile.generatedId + " (" + distributorProfile.mobile +
-                    "). This is a local browser notification preview; SMS was not sent."
-                : "No new application notifications. No SMS is sent by this browser demo.";
+                    "). Notifications are stored locally; delivery is not configured."
+                : "No new application notifications. Notification delivery is not configured.";
             notificationStatus.hidden = false;
         } else {
             notificationStatus.hidden = true;
@@ -1119,6 +1331,9 @@ function initializeOperationsDashboard() {
             const statusLabel = blocked ? "Permanently blocked" :
                 rejected ? "Rejected · correction allowed" :
                     pending ? "Pending review" : "Approved";
+            const servicePinSummary = Array.isArray(application.servicePincodes)
+                ? application.servicePincodes.join(", ")
+                : "";
             const decision = rejected
                 ? '<p class="rejection-reason"><strong>Rejection reason:</strong> ' +
                     escapeHTML(application.rejectionReason || "No reason recorded") + '</p>' +
@@ -1147,6 +1362,12 @@ function initializeOperationsDashboard() {
                 '<h3>' + escapeHTML(application.name) + '</h3>' +
                 '<p>' + escapeHTML(application.business) + ' · ' + escapeHTML(application.city || "") +
                 (application.operationalPin ? ' · PIN ' + escapeHTML(application.operationalPin) : "") + '</p>' +
+                (servicePinSummary
+                    ? '<p>Distributor service PINs: ' + escapeHTML(servicePinSummary) + '</p>'
+                    : "") +
+                (application.assignedMasterAdmin
+                    ? '<p class="master-fallback-label">Master Admin review · no approved Distributor covers this PIN</p>'
+                    : "") +
                 '<p class="application-contact">' + escapeHTML(application.mobile || "") + ' · ' + escapeHTML(application.email || "") + '</p>' +
                 '<small>Reference ' + escapeHTML(application.id) + ' · Submitted ' + formatDate(application.submittedAt) +
                 ' · Revision ' + escapeHTML(application.revision || 1) + '</small>' +
@@ -1261,7 +1482,9 @@ function initializeOperationsDashboard() {
                 '<form class="distributor-mapping-form" data-distributor-application-id="' + escapeHTML(distributor.id) + '">' +
                 '<div class="field"><label for="pins-' + escapeHTML(distributor.id) + '">Service PIN codes</label>' +
                 '<input id="pins-' + escapeHTML(distributor.id) + '" name="pins" value="' +
-                escapeHTML(mapping && Array.isArray(mapping.pins) ? mapping.pins.join(", ") : "") +
+                    escapeHTML(Array.isArray(distributor.servicePincodes) && distributor.servicePincodes.length
+                        ? distributor.servicePincodes.join(", ")
+                        : mapping && Array.isArray(mapping.pins) ? mapping.pins.join(", ") : "") +
                 '" maxlength="1000" placeholder="e.g. 110001, 110002" aria-describedby="pin-help-' +
                 escapeHTML(distributor.id) + '"><small id="pin-help-' + escapeHTML(distributor.id) +
                 '" class="field-hint">Enter comma-separated, unique 6-digit PIN codes. Leave blank to remove this mapping.</small></div>' +
@@ -1270,10 +1493,46 @@ function initializeOperationsDashboard() {
                 escapeHTML(mapping && mapping.region || "") + '" maxlength="120" placeholder="City / district / region"></div>' +
                 '<button class="btn primary" type="submit">Save PIN mapping</button>' +
                 (queueUrl ? '<p class="distributor-queue-link"><strong>Distributor queue link</strong><br><a class="text-link" href="' +
-                    escapeHTML(queueUrl) + '" target="_blank" rel="noopener noreferrer">Open local queue preview</a>' +
-                    '<br><small>Share only with this Distributor. Browser-demo links are not secure authentication.</small></p>' : "") +
+                    escapeHTML(queueUrl) + '" target="_blank" rel="noopener noreferrer">Open Distributor queue</a>' +
+                    '<br><small>This browser-generated link does not authenticate its user. Do not use it as a production access link.</small></p>' : "") +
                 '</form></article>';
         }).join("");
+    }
+
+    function renderRetailerProfiles() {
+        if (!isMaster) {
+            return;
+        }
+        const profiles = readList(RETAIL_PROFILES_KEY);
+        document.getElementById("master-contact-email").value = readMasterContact().email;
+        const container = document.getElementById("retailer-profile-list");
+        container.innerHTML = profiles.length ? profiles.map(function (profile) {
+            return '<article class="approval-card"><div><span class="status-pill ' +
+                (profile.isPasswordSet ? "complete" : "pending") + '">' +
+                (profile.isPasswordSet ? "Activated" : "First login pending") +
+                '</span><p><strong>' + escapeHTML(profile.userId) + '</strong> · ' +
+                escapeHTML(profile.name) + '</p><small>' + escapeHTML(profile.mobile) +
+                ' · ' + escapeHTML(profile.email) + '</small></div></article>';
+        }).join("") : '<p class="empty-state">No pre-created Retailer profiles have been added yet.</p>';
+    }
+
+    function renderUplineRequests() {
+        if (!isMaster) {
+            return;
+        }
+        const requests = readList(UPLINE_REQUESTS_KEY);
+        const container = document.getElementById("upline-request-list");
+        container.innerHTML = requests.length ? requests.map(function (request) {
+            const pending = request.status === "pending";
+            return '<article class="approval-card"><div><span class="status-pill ' +
+                (pending ? "pending" : "complete") + '">' +
+                (pending ? "Awaiting review" : "Reviewed") +
+                '</span><p><strong>' + escapeHTML(request.userId) + '</strong> · ' +
+                escapeHTML(request.name) + '</p><small>' + escapeHTML(request.mobile) +
+                ' · Requested ' + formatDate(request.requestedAt) + '</small></div>' +
+                (pending ? '<button class="btn quiet" type="button" data-upline-action="review" data-upline-id="' +
+                    escapeHTML(request.id) + '">Mark reviewed</button>' : "") + '</article>';
+        }).join("") : '<p class="empty-state">No Upline change requests.</p>';
     }
 
     function renderCriticalRequests() {
@@ -1315,6 +1574,48 @@ function initializeOperationsDashboard() {
             renderApplications();
             return;
         }
+        let distributorMapping = null;
+        let distributorMappings = readList(DISTRIBUTOR_PIN_MAPPINGS_KEY);
+        if (application.role === "distributor" &&
+            Array.isArray(application.servicePincodes) && application.servicePincodes.length) {
+            const pins = application.servicePincodes;
+            const overlappingProfile = applications.find(function (item) {
+                return item.id !== application.id && item.role === "distributor" &&
+                    item.status === "approved" && Array.isArray(item.servicePincodes) &&
+                    item.servicePincodes.some(function (pin) { return pins.includes(pin); });
+            });
+            const overlappingMapping = distributorMappings.find(function (item) {
+                return item.distributorApplicationId !== application.id &&
+                    Array.isArray(item.pins) && item.pins.some(function (pin) { return pins.includes(pin); });
+            });
+            if (overlappingProfile || overlappingMapping) {
+                setDashboardStatus("Approval blocked: one or more service PIN codes are already assigned to another approved Distributor. Resolve the overlap before approving.");
+                document.getElementById("approval-password-panel").hidden = true;
+                pendingApproval = null;
+                return;
+            }
+            distributorMapping = distributorMappings.find(function (item) {
+                return item.distributorApplicationId === application.id;
+            }) || { distributorApplicationId: application.id, createdAt: new Date().toISOString() };
+            if (!distributorMapping.queueAccessToken) {
+                try {
+                    distributorMapping.queueAccessToken = createDistributorQueueToken();
+                } catch (error) {
+                    setDashboardStatus(error.message);
+                    document.getElementById("approval-password-panel").hidden = true;
+                    pendingApproval = null;
+                    return;
+                }
+            }
+            distributorMapping.distributorId = generatedId;
+            distributorMapping.distributorMobile = application.mobile;
+            distributorMapping.distributorName = application.name;
+            distributorMapping.pins = pins;
+            distributorMapping.updatedAt = new Date().toISOString();
+            if (!distributorMappings.includes(distributorMapping)) {
+                distributorMappings.push(distributorMapping);
+            }
+        }
         application.status = "approved";
         application.generatedId = generatedId;
         application.approvedBy = operator.name;
@@ -1324,14 +1625,17 @@ function initializeOperationsDashboard() {
             application.distributorReviewedAt = application.approvedAt;
         }
         writeList(APPLICATIONS_KEY, applications);
+        if (distributorMapping) {
+            writeList(DISTRIBUTOR_PIN_MAPPINGS_KEY, distributorMappings);
+        }
         updateDistributorNotifications(applicationId, "approved");
         renderApplications();
         renderDistributorMappings();
         document.getElementById("approval-password-panel").hidden = true;
         pendingApproval = null;
-        setDashboardStatus("Application approved. Simulated SMS to " + (application.mobile || "the registered mobile") +
-            ": your " + (application.role === "distributor" ? "Distributor" : "Retailer") +
-            " ID is " + generatedId + ". No SMS was sent.");
+        setDashboardStatus("Application approved. The " + (application.role === "distributor" ? "Distributor" : "Retailer") +
+            " ID is " + generatedId + ". Notification delivery is not configured." +
+            (distributorMapping ? " Service PINs are active and the Distributor queue link is ready." : ""));
     }
 
     function finishApplicationRejection(applicationId, reason) {
@@ -1735,6 +2039,10 @@ function initializeOperationsDashboard() {
                 Array.isArray(mapping.pins) && mapping.pins.some(function (pin) {
                     return pins.includes(pin);
                 });
+        }) || readList(APPLICATIONS_KEY).find(function (application) {
+            return application.id !== profile.id && application.role === "distributor" &&
+                application.status === "approved" && Array.isArray(application.servicePincodes) &&
+                application.servicePincodes.some(function (pin) { return pins.includes(pin); });
         });
         if (duplicateOwner) {
             status.textContent = "One or more PIN codes are already assigned to another Distributor. Each PIN must have only one owner.";
@@ -1763,6 +2071,12 @@ function initializeOperationsDashboard() {
         mapping.pins = pins;
         mapping.region = region;
         mapping.updatedAt = new Date().toISOString();
+        const applications = readList(APPLICATIONS_KEY);
+        const currentProfile = applications.find(function (application) {
+            return application.id === profile.id;
+        });
+        currentProfile.servicePincodes = pins;
+        writeList(APPLICATIONS_KEY, applications);
         writeList(DISTRIBUTOR_PIN_MAPPINGS_KEY, mappings);
         status.textContent = pins.length
             ? "PIN mapping saved. Matching Retailer applications will be routed to " + profile.name + "'s Distributor queue."
@@ -1771,18 +2085,84 @@ function initializeOperationsDashboard() {
         renderDistributorMappings();
     });
 
+    document.getElementById("retailer-profile-form").addEventListener("submit", function (event) {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const status = document.getElementById("retailer-profile-status");
+        if (!isMaster || !ensureCurrentOperatorAccess() || !form.reportValidity()) {
+            return;
+        }
+        const data = new FormData(form);
+        const userId = String(data.get("userId")).trim().toUpperCase();
+        const mobile = String(data.get("mobile")).trim();
+        const profiles = readList(RETAIL_PROFILES_KEY);
+        if (profiles.some(function (profile) {
+            return String(profile.userId).toLocaleLowerCase() === userId.toLocaleLowerCase() ||
+                profile.mobile === mobile;
+        })) {
+            status.textContent = "That Retail ID or mobile number is already assigned to a Retailer profile.";
+            status.hidden = false;
+            return;
+        }
+        profiles.push({
+            userId: userId,
+            name: String(data.get("name")).trim(),
+            mobile: mobile,
+            email: String(data.get("email")).trim(),
+            isPasswordSet: false,
+            createdAt: new Date().toISOString()
+        });
+        writeList(RETAIL_PROFILES_KEY, profiles);
+        form.reset();
+        status.textContent = "Retailer profile added. The Retailer can activate the ID once with their registered mobile number.";
+        status.hidden = false;
+        renderRetailerProfiles();
+    });
+
+    document.getElementById("master-contact-form").addEventListener("submit", function (event) {
+        event.preventDefault();
+        const form = event.currentTarget;
+        if (!isMaster || !ensureCurrentOperatorAccess() || !form.reportValidity()) {
+            return;
+        }
+        const email = String(new FormData(form).get("email")).trim();
+        writeMasterContact({ name: "RAHAMTULLA MONDAL", mobile: MASTER_ADMIN_MOBILE, email: email });
+        const status = document.getElementById("retailer-profile-status");
+        status.textContent = "Master Distributor upline contact details saved.";
+        status.hidden = false;
+        renderRetailerProfiles();
+    });
+
+    document.getElementById("upline-request-list").addEventListener("click", function (event) {
+        const button = event.target.closest("[data-upline-action]");
+        if (!button || !isMaster || !ensureCurrentOperatorAccess()) {
+            return;
+        }
+        const requests = readList(UPLINE_REQUESTS_KEY);
+        const request = requests.find(function (item) {
+            return item.id === button.dataset.uplineId && item.status === "pending";
+        });
+        if (!request) {
+            return;
+        }
+        request.status = "reviewed";
+        request.reviewedAt = new Date().toISOString();
+        writeList(UPLINE_REQUESTS_KEY, requests);
+        renderUplineRequests();
+    });
+
     document.getElementById("request-change").addEventListener("click", function () {
         if (!ensureCurrentOperatorAccess()) {
             return;
         }
         if (isMaster) {
-            setDashboardStatus("Master Admin holds ultimate control. No system change was made by this demo.");
+            setDashboardStatus("Master Admin holds ultimate control. No system change was made.");
             return;
         }
         const approvals = readList(MASTER_APPROVALS_KEY);
         approvals.unshift({
             id: createReference("REQ"),
-            description: "Critical system setting or sensitive data change (demo request)",
+            description: "Critical system setting or sensitive data change request",
             operator: operator.name,
             requestedAt: new Date().toISOString(),
             status: "pending"
@@ -1815,13 +2195,16 @@ function initializeOperationsDashboard() {
 
     document.getElementById("staff-signout").addEventListener("click", function () {
         sessionStorage.removeItem(STAFF_SESSION_KEY);
+        sessionStorage.removeItem(CURRENT_SUBADMIN_KEY);
         window.location.assign("login.html");
     });
 
     window.addEventListener("storage", function (event) {
         if ([APPLICATIONS_KEY, BLOCKED_PARTNER_MOBILES_KEY, DISTRIBUTOR_PIN_MAPPINGS_KEY,
             DISTRIBUTOR_NOTIFICATIONS_KEY, OPERATORS_KEY, OPERATOR_REQUESTS_KEY,
-            OPERATOR_WHITELIST_KEY, MASTER_APPROVALS_KEY, CREDENTIALS_KEY].includes(event.key)) {
+            OPERATOR_WHITELIST_KEY, MASTER_APPROVALS_KEY, CREDENTIALS_KEY,
+            RETAIL_PROFILES_KEY, MASTER_CONTACT_KEY, UPLINE_REQUESTS_KEY,
+            SERVICE_REQUESTS_KEY].includes(event.key)) {
             if (isDistributorMode && !ensureCurrentOperatorAccess()) {
                 return;
             }
@@ -1834,6 +2217,8 @@ function initializeOperationsDashboard() {
             renderOperatorRequests();
             renderOperatorWhitelist();
             renderCriticalRequests();
+            renderRetailerProfiles();
+            renderUplineRequests();
         }
     });
 
@@ -1842,6 +2227,215 @@ function initializeOperationsDashboard() {
     renderOperatorRequests();
     renderOperatorWhitelist();
     renderCriticalRequests();
+    renderRetailerProfiles();
+    renderUplineRequests();
+}
+
+function initializeRetailerDashboard() {
+    const content = document.getElementById("retailer-profile-content");
+    if (!content) {
+        return;
+    }
+    const denied = document.getElementById("retailer-access-denied");
+    let retailerSession;
+    try {
+        retailerSession = JSON.parse(sessionStorage.getItem(RETAIL_SESSION_KEY) || "null");
+    } catch (error) {
+        sessionStorage.removeItem(RETAIL_SESSION_KEY);
+    }
+    if (!retailerSession || !retailerSession.userId ||
+        !Number.isFinite(retailerSession.authenticatedAt) ||
+        Date.now() - retailerSession.authenticatedAt > STAFF_SESSION_LIFETIME) {
+        sessionStorage.removeItem(RETAIL_SESSION_KEY);
+        denied.hidden = false;
+        return;
+    }
+    const profile = readList(RETAIL_PROFILES_KEY).find(function (item) {
+        return String(item.userId).toLocaleLowerCase() ===
+            String(retailerSession.userId).toLocaleLowerCase() && item.isPasswordSet;
+    });
+    if (!profile) {
+        sessionStorage.removeItem(RETAIL_SESSION_KEY);
+        denied.hidden = false;
+        return;
+    }
+    content.hidden = false;
+    document.getElementById("retailer-welcome").textContent = "Welcome, " + profile.name;
+    document.getElementById("retailer-profile-id").textContent = profile.userId;
+    document.getElementById("retailer-profile-name").textContent = profile.name;
+    document.getElementById("retailer-profile-mobile").textContent = profile.mobile;
+    document.getElementById("retailer-profile-email").textContent = profile.email;
+    document.getElementById("upline-email").textContent = readMasterContact().email || "Not configured";
+    const status = document.getElementById("retailer-profile-status");
+    document.getElementById("change-upline-request").addEventListener("click", function () {
+        const requests = readList(UPLINE_REQUESTS_KEY);
+        if (requests.some(function (request) {
+            return request.userId === profile.userId && request.status === "pending";
+        })) {
+            status.textContent = "A Change Upline request is already waiting for Master Admin review.";
+            status.hidden = false;
+            return;
+        }
+        requests.unshift({
+            id: createReference("UPL"),
+            userId: profile.userId,
+            name: profile.name,
+            mobile: profile.mobile,
+            requestedAt: new Date().toISOString(),
+            status: "pending"
+        });
+        writeList(UPLINE_REQUESTS_KEY, requests);
+        status.textContent = "Your Change Upline request has been sent to the Master Admin for review.";
+        status.hidden = false;
+    });
+    document.getElementById("retailer-signout").addEventListener("click", function () {
+        sessionStorage.removeItem(RETAIL_SESSION_KEY);
+        window.location.assign("login.html");
+    });
+}
+
+function initializeServiceRequests() {
+    const form = document.getElementById("service-request-form");
+    if (form) {
+        document.querySelectorAll("[data-service-choice]").forEach(function (link) {
+            link.addEventListener("click", function () {
+                document.getElementById("service-request-type").value = link.dataset.serviceChoice;
+            });
+        });
+        form.addEventListener("submit", function (event) {
+            event.preventDefault();
+            const status = document.getElementById("service-request-status");
+            if (!form.reportValidity()) {
+                return;
+            }
+            const data = new FormData(form);
+            const mobile = String(data.get("mobile")).trim();
+            if (!/^\d{10}$/.test(mobile)) {
+                status.textContent = "Enter a valid 10-digit mobile number.";
+                status.hidden = false;
+                return;
+            }
+            const requests = readList(SERVICE_REQUESTS_KEY);
+            requests.unshift({
+                id: createReference("SRV"),
+                name: String(data.get("name")).trim(),
+                mobile: mobile,
+                service: String(data.get("service")).trim(),
+                message: String(data.get("message") || "").trim(),
+                requestedAt: new Date().toISOString(),
+                status: "pending"
+            });
+            writeList(SERVICE_REQUESTS_KEY, requests);
+            form.reset();
+            status.textContent = "Your enquiry was saved in this browser. It was not delivered to our team.";
+            status.hidden = false;
+        });
+    }
+
+    const container = document.getElementById("service-request-list");
+    if (!container) {
+        return;
+    }
+    function renderServiceRequests() {
+        const requests = readList(SERVICE_REQUESTS_KEY);
+        container.innerHTML = requests.length ? requests.map(function (request) {
+            const pending = request.status === "pending";
+            return '<article class="application-card"><div class="application-details">' +
+                '<span class="application-type">' + (pending ? "New enquiry" : "Contacted") + '</span>' +
+                '<h3>' + escapeHTML(request.service) + '</h3><p>' + escapeHTML(request.name) +
+                ' · ' + escapeHTML(request.mobile) + '</p><p>' + escapeHTML(request.message || "No details added.") +
+                '</p><small>Request ' + escapeHTML(request.id) + ' · ' + formatDate(request.requestedAt) +
+                '</small></div>' + (pending ? '<button class="btn quiet" type="button" data-service-action="contacted" data-service-id="' +
+                    escapeHTML(request.id) + '">Mark contacted</button>' : "") + '</article>';
+        }).join("") : '<p class="empty-state">No service enquiries have been submitted.</p>';
+    }
+    container.addEventListener("click", function (event) {
+        const button = event.target.closest("[data-service-action]");
+        if (!button) {
+            return;
+        }
+        const requests = readList(SERVICE_REQUESTS_KEY);
+        const request = requests.find(function (item) {
+            return item.id === button.dataset.serviceId && item.status === "pending";
+        });
+        if (!request) {
+            return;
+        }
+        request.status = "contacted";
+        request.contactedAt = new Date().toISOString();
+        writeList(SERVICE_REQUESTS_KEY, requests);
+        renderServiceRequests();
+    });
+    window.addEventListener("storage", function (event) {
+        if (event.key === SERVICE_REQUESTS_KEY) {
+            renderServiceRequests();
+        }
+    });
+    renderServiceRequests();
+}
+
+function initializePwa() {
+    const statusElements = document.querySelectorAll("#install-app-status");
+    const installButtons = document.querySelectorAll("#install-app-button");
+    let installPrompt = null;
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const isStandalone = window.matchMedia("(display-mode: standalone)").matches ||
+        navigator.standalone === true;
+    function showStatus(message) {
+        statusElements.forEach(function (element) {
+            element.textContent = message;
+            element.hidden = false;
+        });
+    }
+    if ("serviceWorker" in navigator &&
+        (window.isSecureContext || window.location.hostname === "localhost" ||
+            window.location.hostname === "127.0.0.1")) {
+        navigator.serviceWorker.register("sw.js").catch(function (error) {
+            console.error("Service worker registration failed:", error);
+            showStatus("Offline support could not be enabled. Check the browser's service-worker settings and reload.");
+        });
+    }
+    if (!isStandalone) {
+        installButtons.forEach(function (button) {
+            button.textContent = isIOS ? "Add to Home Screen" : "Install app";
+            button.hidden = false;
+        });
+    }
+    window.addEventListener("beforeinstallprompt", function (event) {
+        event.preventDefault();
+        installPrompt = event;
+        installButtons.forEach(function (button) {
+            button.textContent = "Install app";
+            button.hidden = false;
+        });
+    });
+    installButtons.forEach(function (button) {
+        button.addEventListener("click", async function () {
+            if (!installPrompt) {
+                showStatus(isIOS
+                    ? "In Safari, tap Share, then choose Add to Home Screen."
+                    : "To install, open your browser menu and choose Install app or Add to Home Screen.");
+                return;
+            }
+            installPrompt.prompt();
+            const result = await installPrompt.userChoice;
+            installPrompt = null;
+            installButtons.forEach(function (installButton) {
+                installButton.hidden = true;
+            });
+            if (result.outcome === "accepted") {
+                showStatus("R.M Digital Centre was added to your device.");
+            }
+        });
+    });
+    window.addEventListener("appinstalled", function () {
+        installPrompt = null;
+        installButtons.forEach(function (button) {
+            button.hidden = true;
+        });
+        showStatus("R.M Digital Centre is installed.");
+    });
 }
 
 function readList(key) {
@@ -1851,9 +2445,25 @@ function readList(key) {
     }
     const parsed = JSON.parse(value);
     if (!Array.isArray(parsed)) {
-        throw new Error("Stored portal data for " + key + " is invalid. Clear the demo portal data and reload.");
+        throw new Error("Stored portal data for " + key + " is invalid. Clear the portal data and reload.");
     }
     return parsed;
+}
+
+function readMasterContact() {
+    const value = localStorage.getItem(MASTER_CONTACT_KEY);
+    if (value === null) {
+        return { name: "RAHAMTULLA MONDAL", mobile: MASTER_ADMIN_MOBILE, email: "" };
+    }
+    const contact = JSON.parse(value);
+    if (!contact || typeof contact !== "object" || typeof contact.email !== "string") {
+        throw new Error("Stored Master Distributor contact details are invalid. Update them from the Master Admin dashboard.");
+    }
+    return contact;
+}
+
+function writeMasterContact(contact) {
+    localStorage.setItem(MASTER_CONTACT_KEY, JSON.stringify(contact));
 }
 
 function isPartnerMobileBlocked(mobile) {
@@ -1870,18 +2480,26 @@ function normalizeApplicationStatus(application) {
 
 function findDistributorForPin(pin) {
     const applications = readList(APPLICATIONS_KEY);
-    const matchingMappings = readList(DISTRIBUTOR_PIN_MAPPINGS_KEY).filter(function (item) {
-        return Array.isArray(item.pins) && item.pins.includes(pin);
+    const mappings = readList(DISTRIBUTOR_PIN_MAPPINGS_KEY);
+    const matches = applications.filter(function (application) {
+        if (application.role !== "distributor" || application.status !== "approved" ||
+            !application.generatedId) {
+            return false;
+        }
+        const mapping = mappings.find(function (item) {
+            return item.distributorApplicationId === application.id &&
+                item.distributorId === application.generatedId;
+        });
+        const profilePins = Array.isArray(application.servicePincodes)
+            ? application.servicePincodes
+            : [];
+        const mappingPins = mapping && Array.isArray(mapping.pins) ? mapping.pins : [];
+        return profilePins.includes(pin) || mappingPins.includes(pin);
     });
-    if (matchingMappings.length !== 1) {
+    if (matches.length !== 1) {
         return null;
     }
-    const mapping = matchingMappings[0];
-    const distributor = applications.find(function (item) {
-        return item.id === mapping.distributorApplicationId &&
-            item.role === "distributor" && item.status === "approved" &&
-            item.generatedId === mapping.distributorId;
-    });
+    const distributor = matches[0];
     return distributor ? {
         applicationId: distributor.id,
         generatedId: distributor.generatedId,

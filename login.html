@@ -6,21 +6,26 @@
     <meta name="theme-color" content="#0f172a">
     <meta name="description" content="Sign in to your R.M Digital Centre partner account.">
     <title>Portal login | R.M Digital Centre</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="navbar">
-        <a class="logo" href="index.html">R.M <span>Digital Centre</span></a>
+        <a class="logo" href="index.html" aria-label="R.M Digital Centre home">
+            <img src="icon.svg" alt="" aria-hidden="true">
+            <span><strong>R.M</strong><small>Digital Centre</small></span>
+        </a>
         <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="register.html">Apply to join</a></nav>
     </header>
     <main id="main-content" class="form-page">
         <section class="form-card" aria-labelledby="page-title">
-            <p class="eyebrow">SECURE PORTAL</p>
+            <p class="eyebrow">PARTNER PORTAL</p>
             <h1 id="page-title">Welcome back</h1>
-            <p class="form-intro">Enter your authorized staff mobile number to continue.</p>
+            <p class="form-intro">Sign in with your staff mobile number or official Retail ID.</p>
             <form id="portal-login-form" novalidate>
-                <div class="field"><label for="login-mobile">Mobile number</label><input id="login-mobile" name="mobile" type="tel" inputmode="numeric" autocomplete="tel" pattern="[0-9]{10,15}" maxlength="15" required></div>
+                <div class="field"><label for="login-mobile">Mobile number or Retail ID</label><input id="login-mobile" name="mobile" autocomplete="username" maxlength="20" required></div>
                 <button class="btn primary form-submit" type="submit">Continue</button>
             </form>
             <form id="login-password-form" class="flow-step" hidden>
@@ -33,13 +38,22 @@
             </form>
             <form id="first-time-setup-form" class="flow-step" hidden>
                 <h2 id="setup-title">Set up your password</h2>
-                <p class="form-intro">Choose a strong password and a recovery phrase. Keep the recovery phrase private; it is needed to reset this demo account.</p>
+                <p class="form-intro">Choose a strong password and a recovery phrase. Keep your recovery phrase private; it is needed to reset your account.</p>
                 <div class="field" id="setup-name-field" hidden><label for="setup-name">Full name</label><input id="setup-name" name="name" autocomplete="name"></div>
                 <div class="field"><label for="setup-password">New password</label><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
                 <div class="field"><label for="setup-password-confirm">Confirm password</label><input id="setup-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
                 <div class="field"><label for="setup-recovery">Recovery phrase (12+ characters)</label><input id="setup-recovery" name="recovery" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
                 <div class="field"><label for="setup-recovery-confirm">Confirm recovery phrase</label><input id="setup-recovery-confirm" name="recoveryConfirm" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
                 <button class="btn primary form-submit" type="submit">Save password</button>
+            </form>
+            <form id="retailer-activation-form" class="flow-step" hidden>
+                <h2>Activate your Retail ID</h2>
+                <p class="form-intro">Confirm the mobile number on your official Retailer profile and create your password. Activation can only be completed once.</p>
+                <div class="field"><label for="retail-activation-mobile">Registered mobile number</label><input id="retail-activation-mobile" name="mobile" type="tel" inputmode="numeric" autocomplete="tel" pattern="[0-9]{10}" maxlength="10" required></div>
+                <div class="field"><label for="retail-activation-password">New password</label><input id="retail-activation-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <div class="field"><label for="retail-activation-password-confirm">Confirm password</label><input id="retail-activation-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <button class="btn primary form-submit" type="submit">Activate Retail ID</button>
+                <button class="text-button" type="button" id="retail-activation-back">Use a different ID</button>
             </form>
             <form id="password-recovery-form" class="flow-step" hidden>
                 <h2>Reset password</h2>
@@ -59,8 +73,10 @@
                 <button class="btn primary form-submit" type="submit">Request Master approval</button>
             </form>
             <p class="form-status" id="login-status" role="status" aria-live="polite" hidden></p>
-            <p class="security-note">Browser-only demonstration: passwords are hashed, but local storage and whitelist records can be edited and mobile numbers are not verified. Use server-side authentication and a verified recovery channel before production.</p>
+            <p class="data-handling-note">Account information is stored in this browser and is not protected by a server-backed identity service. Do not use real passwords or sensitive account information.</p>
             <p class="form-note">Not a partner yet? <a href="register.html">Apply for a Retailer or Distributor ID</a>.</p>
+            <button class="install-app-button" id="install-app-button" type="button" hidden>Install app</button>
+            <p class="install-app-status form-status" id="install-app-status" role="status" aria-live="polite" hidden></p>
         </section>
     </main>
     <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. All rights reserved.</p></footer>

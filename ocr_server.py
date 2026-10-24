@@ -1,4 +1,4 @@
-"""Local-only OCR endpoint for the R.M Digital Centre demo."""
+"""Local OCR endpoint for the R.M Digital Centre document text service."""
 
 from __future__ import annotations
 
