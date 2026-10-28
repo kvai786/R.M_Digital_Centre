@@ -23,7 +23,7 @@
         <section id="dashboard-access-denied" class="form-card" hidden>
             <p class="eyebrow">STAFF ACCESS REQUIRED</p>
             <h1>Sign in to continue</h1>
-            <p class="form-intro">Access is limited to the Master Admin or an accepted Sub-Admin whose name and mobile still match the Master Admin whitelist.</p>
+            <p class="form-intro">Access is limited to the Super Admin and approved staff who complete password and authenticator verification.</p>
             <a class="btn primary" href="login.html">Continue to sign in</a>
         </section>
         <div id="operations-content" hidden>
@@ -33,26 +33,48 @@
         <div class="data-handling-note operations-data-note">This workspace uses server-managed authentication and database-backed records. Do not store passwords, OTPs, Aadhaar numbers, or banking PINs in application notes.</div>
         <section class="operator-controls" aria-labelledby="operator-title">
             <div><h2 id="operator-title">Signed-in operator</h2><p id="operator-caption">Master Admin</p></div>
-            <div class="operator-hierarchy"><span>Master Admin</span><span aria-hidden="true">→</span><span>Sub-Admin / Operator</span></div>
+            <div class="operator-hierarchy"><span>Super Admin</span><span aria-hidden="true">→</span><span>Master Admin</span><span aria-hidden="true">→</span><span>Sub-Admin</span></div>
             <button type="button" class="btn quiet" id="staff-signout">Sign out</button>
         </section>
         <section class="dashboard-stats" aria-label="Application summary">
             <article class="stat-card"><span>Pending applications</span><strong id="pending-count">0</strong></article>
             <article class="stat-card"><span>Awaiting Master approval</span><strong id="approval-count">0</strong></article>
         </section>
-        <section class="dashboard-section master-only" id="operator-enrollment-section" aria-labelledby="operator-enrollment-title" hidden>
-            <div class="section-heading"><div><p class="eyebrow">MASTER ADMIN CONTROL</p><h2 id="operator-enrollment-title">Sub-Admin enrollment requests</h2><p class="section-desc">Review every request. Accept only a name/mobile pair on your authorization whitelist; reject terminates that request.</p></div></div>
-            <div id="operator-request-list" class="application-list" aria-live="polite"></div>
+        <section class="dashboard-section owner-only" id="owner-staff-section" aria-labelledby="owner-staff-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">SUPER ADMIN (OWNER) ONLY</p><h2 id="owner-staff-title">Pre-authorize staff</h2><p class="section-desc">Staff cannot register publicly. Add their details here; they then set their own password from the login page and wait for your final approval.</p></div></div>
+            <div class="preauth-grid">
+                <form id="preauth-masteradmin-form" class="whitelist-form" data-role="masteradmin">
+                    <h3>Pre-Authorize Master Admin</h3>
+                    <div class="field"><label for="pm-name">Full name</label><input id="pm-name" name="name" autocomplete="off" minlength="2" maxlength="80" required></div>
+                    <div class="field"><label for="pm-mobile">Mobile number</label><input id="pm-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" required></div>
+                    <div class="field"><label for="pm-scope">Assigned region / state</label><input id="pm-scope" name="scope" autocomplete="off" minlength="2" maxlength="120" required></div>
+                    <button class="btn primary" type="submit">Pre-authorize Master Admin</button>
+                </form>
+                <form id="preauth-subadmin-form" class="whitelist-form" data-role="subadmin">
+                    <h3>Pre-Authorize Sub-Admin</h3>
+                    <div class="field"><label for="ps-name">Full name</label><input id="ps-name" name="name" autocomplete="off" minlength="2" maxlength="80" required></div>
+                    <div class="field"><label for="ps-mobile">Mobile number</label><input id="ps-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" required></div>
+                    <div class="field"><label for="ps-scope">Assigned role scope</label><input id="ps-scope" name="scope" autocomplete="off" minlength="2" maxlength="120" required></div>
+                    <button class="btn primary" type="submit">Pre-authorize Sub-Admin</button>
+                </form>
+            </div>
+            <p class="form-status" id="owner-staff-status" role="status" aria-live="polite" hidden></p>
+            <h3>Final approval queue</h3>
+            <div id="owner-staff-queue" class="application-list" aria-live="polite"></div>
+            <h3>All authorized staff</h3>
+            <div id="owner-staff-list" class="application-list" aria-live="polite"></div>
         </section>
-        <section class="dashboard-section master-only" id="operator-whitelist-section" aria-labelledby="operator-whitelist-title" hidden>
-            <div class="section-heading"><div><p class="eyebrow">AUTHORIZED IDENTITIES</p><h2 id="operator-whitelist-title">Sub-Admin access lifecycle</h2><p class="section-desc">Control each authorized identity. Hold pauses access; permanent ban blocks re-registration; reset/reactivate clears restrictions and forces fresh password setup; delete removes all records and allows a clean re-add.</p></div></div>
-            <form id="operator-whitelist-form" class="whitelist-form">
-                <div class="field"><label for="whitelist-name">Authorized Sub-Admin name</label><input id="whitelist-name" name="name" autocomplete="off" maxlength="80" required></div>
-                <div class="field"><label for="whitelist-mobile">Authorized mobile number</label><input id="whitelist-mobile" name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10,15}" maxlength="15" required></div>
-                <button class="btn primary" type="submit">Add / re-add authorized identity</button>
+        <section class="dashboard-section owner-or-master" id="helpline-section" aria-labelledby="helpline-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">OFFICIAL HELPLINE</p><h2 id="helpline-title">Partner helpline number</h2><p class="section-desc">Shown only inside the private dashboards of approved Retailers and Distributors. Update it here when the official SIM or number changes.</p></div></div>
+            <form id="helpline-form" class="whitelist-form">
+                <div class="field"><label for="helpline-phone">Helpline phone number</label><input id="helpline-phone" name="phone" type="tel" maxlength="20" pattern="\+?[0-9][0-9 \-]{6,18}[0-9]" required></div>
+                <button class="btn primary" type="submit">Save helpline</button>
             </form>
-            <p class="form-status" id="whitelist-status" role="status" aria-live="polite" hidden></p>
-            <div id="operator-whitelist-list" class="application-list" aria-live="polite"></div>
+            <p class="form-status" id="helpline-status" role="status" aria-live="polite" hidden></p>
+        </section>
+        <section class="dashboard-section" id="support-tickets-section" aria-labelledby="support-tickets-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">SUPPORT DESK</p><h2 id="support-tickets-title">Partner support tickets</h2></div></div>
+            <div id="support-ticket-list" class="application-list" aria-live="polite"></div>
         </section>
         <section class="dashboard-section master-only" id="retailer-profiles-section" aria-labelledby="retailer-profiles-title" hidden>
             <div class="section-heading"><div><p class="eyebrow">RETAIL ID ACTIVATION</p><h2 id="retailer-profiles-title">Pre-created Retailer profiles</h2><p class="section-desc">Add the official Retail ID, profile details and registered mobile. The Retailer sets a password once on first login; only a password hash is stored.</p></div></div>
@@ -63,12 +85,6 @@
                 <div class="field"><label for="retail-profile-email">Email address</label><input id="retail-profile-email" name="email" type="email" maxlength="254" required></div>
                 <button class="btn primary" type="submit">Add Retailer profile</button>
             </form>
-            <form id="master-contact-form" class="whitelist-form master-contact-form">
-                <div class="field"><label>Master Distributor name</label><input value="RAHAMTULLA MONDAL" readonly></div>
-                <div class="field"><label for="master-contact-mobile">Master Distributor mobile</label><input id="master-contact-mobile" readonly></div>
-                <div class="field"><label for="master-contact-email">Master Distributor email</label><input id="master-contact-email" name="email" type="email" maxlength="254" required></div>
-                <button class="btn secondary" type="submit">Save upline contact</button>
-            </form>
             <p class="form-status" id="retailer-profile-status" role="status" aria-live="polite" hidden></p>
             <div id="retailer-profile-list" class="application-list" aria-live="polite"></div>
         </section>
@@ -77,6 +93,32 @@
             <div id="distributor-mapping-list" class="application-list" aria-live="polite"></div>
             <p class="form-status" id="distributor-mapping-status" role="status" aria-live="polite" hidden></p>
         </section>
+        <section class="dashboard-section" id="distributor-support-section" aria-labelledby="distributor-support-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">SUPPORT</p><h2 id="distributor-support-title">Official helpline &amp; support tickets</h2><p class="section-desc">Official helpline: <strong id="partner-helpline">Not available</strong></p></div></div>
+            <form class="whitelist-form support-ticket-form" id="support-ticket-form">
+                <div class="field"><label for="ticket-category">Type</label><select id="ticket-category" name="category"><option value="support">Support</option><option value="complaint">Complaint</option><option value="service">Service</option><option value="other">Other</option></select></div>
+                <div class="field"><label for="ticket-subject">Subject</label><input id="ticket-subject" name="subject" minlength="3" maxlength="100" required></div>
+                <div class="field"><label for="ticket-message">Details</label><textarea id="ticket-message" name="message" minlength="5" maxlength="1000" rows="4" required></textarea></div>
+                <button class="btn primary" type="submit">Submit ticket</button>
+            </form>
+            <p class="form-status" id="ticket-status" role="status" aria-live="polite" hidden></p>
+            <div id="my-ticket-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section" id="distributor-network-section" aria-labelledby="distributor-network-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">MY RETAILER NETWORK</p><h2 id="distributor-network-title">Retailers mapped to you</h2><p class="section-desc" id="distributor-network-desc">Only Retailers assigned to your Distributor ID are shown.</p></div></div>
+            <section class="dashboard-stats" aria-label="Network summary">
+                <article class="stat-card"><span>Mapped retailers</span><strong id="net-total">0</strong></article>
+                <article class="stat-card"><span>Active</span><strong id="net-active">0</strong></article>
+                <article class="stat-card"><span>Onboarding requests</span><strong id="net-pending">0</strong></article>
+                <article class="stat-card"><span>Transactions</span><strong id="net-transactions">0</strong></article>
+            </section>
+            <div id="distributor-network-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <section class="dashboard-section" id="partner-network-section" aria-labelledby="partner-network-title" hidden>
+            <div class="section-heading"><div><p class="eyebrow">AREA HIERARCHY</p><h2 id="partner-network-title">Distributors &amp; mapped Retailers</h2><p class="section-desc">View every area, re-assign Retailers between Distributors, approve onboarding, or suspend / reactivate partners. Actions are audited.</p></div></div>
+            <div id="partner-network-list" class="application-list" aria-live="polite"></div>
+        </section>
+        <p class="form-status" id="network-status" role="status" aria-live="polite" hidden></p>
         <section class="dashboard-section" aria-labelledby="applications-title">
             <div class="section-heading"><div><p class="eyebrow">SHARED APPLICATION QUEUE</p><h2 id="applications-title">Retailer &amp; Distributor applications</h2><p class="section-desc">Block permanently prevents future submissions from that mobile. Delete removes only the selected application record. Rejection sends the applicant to the correction and re-upload flow.</p></div></div>
             <p class="distributor-notification-status" id="distributor-notification-status" role="status" aria-live="polite" hidden></p>

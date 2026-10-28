@@ -89,68 +89,38 @@
                 <div class="hero-buttons">
                     <a href="register.html" class="btn primary">Become a partner</a>
                     <a href="#services" class="btn secondary">Explore services</a>
+                    <a href="#download-app" class="btn ghost">Get the app</a>
                 </div>
-                <button class="install-app-button" id="install-app-button" type="button" hidden>Install app</button>
-                <p class="install-app-status form-status" id="install-app-status" role="status" aria-live="polite" hidden></p>
+                <ul class="hero-stats" aria-label="Highlights">
+                    <li><strong>11</strong><span>Services</span></li>
+                    <li><strong>2</strong><span>Partner roles</span></li>
+                    <li><strong>24x7</strong><span>Portal access</span></li>
+                </ul>
             </div>
         </section>
 
-        <section class="services-section" id="services" aria-labelledby="services-title">
-            <p class="eyebrow">SERVICES</p>
-            <h2 id="services-title">One centre. A wide range of services.</h2>
-            <p class="section-desc">Support customers with essential financial and utility services from a local outlet.</p>
-            <div class="services-grid">
-                <article class="service-card service-card-featured">
-                    <div class="service-card-heading">
-                        <span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 4l9 6.5M5 10v9h14v-9M9 19v-5h6v5M8 10h.01M12 10h.01M16 10h.01"/></svg></span>
-                        <span class="service-tag">ASSISTED BANKING</span>
-                    </div>
-                    <h3>AEPS</h3>
-                    <p>Aadhaar Enabled Payment System services for eligible biometric and Aadhaar-authenticated banking transactions. Use only a certified Registered Device (RD) service and authorized provider.</p>
-                    <div class="subservice-grid" aria-label="AEPS services">
-                        <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7h18v13H3zM3 10h18M7 15h4M7 4h10"/></svg></span><h4>Cash withdrawal</h4><p>Withdraw cash using eligible Aadhaar-linked accounts.</p></article>
-                        <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></svg></span><h4>Balance enquiry</h4><p>Check available account balance through assisted service.</p></article>
-                        <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6zM9 7h6M9 11h6M9 15h6M9 19h3"/></svg></span><h4>Mini statement</h4><p>View recent account transactions in a mini statement.</p></article>
-                        <article class="subservice-card"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg></span><h4>Aadhaar Pay</h4><p>Accept eligible Aadhaar-authenticated customer payments.</p></article>
-                    </div>
-                    <a class="service-card-link" href="#service-request" data-service-choice="AEPS / RD device information">Ask about AEPS</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 3h16v18H4zM8 7h8M8 11h2M14 11h2M8 15h2M14 15h2M8 19h8"/></svg></span><span class="service-tag">CASH ACCESS</span></div>
-                    <h3>Micro ATM</h3>
-                    <p>Provide assisted card-based banking and cash access using an authorized Micro ATM device.</p>
-                    <a class="service-card-link" href="#service-request" data-service-choice="Micro ATM / money transfer">Ask about Micro ATM</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h5M16 4l3 3"/></svg></span><span class="service-tag">TRANSFERS</span></div>
-                    <h3>Domestic Money Transfer</h3><p>Help customers make domestic money transfers through an assisted service point, subject to provider availability.</p><a class="service-card-link" href="#service-request" data-service-choice="Micro ATM / money transfer">Ask about transfers</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 21V5l8-3v19M12 9h8v12M7 8h2M7 12h2M7 16h2M15 12h2M15 16h2M2 21h20"/></svg></span><span class="service-tag">EVERYDAY BILLS</span></div>
-                    <h3>Utility bill payments</h3><p>Convenient assisted payments for essential household utilities.</p>
-                    <ul class="utility-list"><li><span aria-hidden="true">ϟ</span> Electricity bills</li><li><span aria-hidden="true">◉</span> Water bills</li><li><span aria-hidden="true">♨</span> Gas bills &amp; booking</li></ul>
-                    <a class="service-card-link" href="#service-request" data-service-choice="BBPS / bill payment">Ask about bill payments</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h3M15 13h1M8 16h8"/></svg></span><span class="service-tag">BILLING NETWORK</span></div>
-                    <h3>BBPS &amp; Recharges</h3><p>Offer Bharat BillPay services and mobile or DTH recharges from one local outlet.</p><a class="service-card-link" href="#service-request" data-service-choice="BBPS / bill payment">Ask about BBPS</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M8 16h3M16 13v5M13.5 15.5H18.5"/></svg></span><span class="service-tag">REPAYMENTS</span></div>
-                    <h3>Loan repayments</h3><p>Help customers make eligible loan repayments at a nearby assisted service centre.</p><a class="service-card-link" href="#service-request" data-service-choice="Loan repayment support">Ask about repayments</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true">ID</span><span class="service-tag">IDENTITY SERVICES</span></div>
-                    <h3>PAN card processing</h3><p>Assisted PAN applications and correction requests through authorized service providers.</p><a class="service-card-link" href="#service-request" data-service-choice="PAN card processing">Ask about PAN services</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true">IN</span><span class="service-tag">GOVERNMENT SERVICES</span></div>
-                    <h3>Local digital services</h3><p>Guidance for eligible schemes and applications such as Krishak Bandhu, Jai Bangla and other state services.</p><a class="service-card-link" href="#service-request" data-service-choice="Krishak Bandhu / Jai Bangla">Ask about government services</a>
-                </article>
-                <article class="service-card">
-                    <div class="service-card-heading"><span class="card-icon" aria-hidden="true">↗</span><span class="service-tag">ASSISTED SUPPORT</span></div>
-                    <h3>Retailer service desk</h3><p>Request onboarding, device and service support from the R.M Digital Centre team.</p><a class="service-card-link" href="#service-request" data-service-choice="Retailer or Distributor support">Contact the service desk</a>
-                </article>
+        <section class="glance-section" id="services" aria-labelledby="glance-title">
+            <p class="eyebrow">ALL SERVICES</p>
+            <h2 id="glance-title">Every service, at a glance.</h2>
+            <p class="section-desc">Tap any service to send an enquiry. Availability depends on provider and your partner plan.</p>
+            <h3 class="glance-group">Banking &amp; payments</h3>
+            <div class="glance-grid">
+                <button type="button" class="glance-tile" data-service-key="aeps" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 7h18v13H3zM3 10h18M7 15h4M7 4h10"/></svg></span><strong>AEPS</strong><small>Withdrawal, balance, statement, Aadhaar Pay</small></button>
+                <button type="button" class="glance-tile" data-service-key="microatm" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 3h16v18H4zM8 7h8M8 11h2M14 11h2M8 15h2M14 15h2M8 19h8"/></svg></span><strong>Micro ATM</strong><small>Card-based cash access</small></button>
+                <button type="button" class="glance-tile" data-service-key="dmt" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h5"/></svg></span><strong>Money Transfer</strong><small>Domestic DMT</small></button>
+                                <button type="button" class="glance-tile" data-service-key="loan" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9h8M8 13h5M16 13v5M13.5 15.5h5"/></svg></span><strong>Loan Repayment</strong><small>EMI collection</small></button>
+                            </div>
+                            <h3 class="glance-group">Bills &amp; recharges</h3>
+                            <div class="glance-grid">                <button type="button" class="glance-tile" data-service-key="electricity" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></span><strong>Electricity Bill</strong><small>Pay power bills</small></button>
+                <button type="button" class="glance-tile" data-service-key="watergas" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3c4 5 6 8 6 11a6 6 0 0 1-12 0c0-3 2-6 6-11z"/></svg></span><strong>Water &amp; Gas</strong><small>Bills &amp; cylinder booking</small></button>
+                <button type="button" class="glance-tile" data-service-key="mobile" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 2h10v20H7zM11 18h2"/></svg></span><strong>Mobile &amp; DTH</strong><small>Prepaid recharges</small></button>
+                <button type="button" class="glance-tile" data-service-key="bills" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 6h18v12H3zM3 10h18M7 15h3"/></svg></span><strong>Other Bills</strong><small>Bharat BillPay (BBPS)</small></button>
+            </div>
+            <h3 class="glance-group">Identity, government &amp; support</h3>
+            <div class="glance-grid">
+                <button type="button" class="glance-tile" data-service-key="pan" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 5h18v14H3zM7 10h4M7 14h6M15 9h3v4h-3z"/></svg></span><strong>PAN Card</strong><small>Apply &amp; correct</small></button>
+                <button type="button" class="glance-tile" data-service-key="govt" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 10 12 4l9 6M5 10v9h14v-9M9 19v-5h6v5"/></svg></span><strong>Govt. Services</strong><small>Krishak Bandhu, Jai Bangla</small></button>
+                <button type="button" class="glance-tile" data-service-key="desk" aria-haspopup="dialog"><span class="glance-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg></span><strong>Service Desk</strong><small>Onboarding &amp; support</small></button>
             </div>
         </section>
 
@@ -190,18 +160,41 @@
                 <article class="role-card">
                     <p class="role-label">LOCAL SERVICE PARTNER</p><h3>Retailer</h3>
                     <p>Serve customers in your community with assisted digital services. Earn commission on eligible transactions under your approved partner plan; rates depend on service and provider.</p>
+                    <ul class="role-perks"><li>Banking, bills &amp; recharge services</li><li>Dedicated retailer dashboard</li><li>Support from your local distributor</li></ul>
                     <a class="text-link" href="register.html?role=retailer">Apply for a Retailer ID <span aria-hidden="true">→</span></a>
                 </article>
                 <article class="role-card role-card-featured">
                     <p class="role-label">NETWORK BUILDER</p><h3>Distributor</h3>
                     <p>Build and support a local retailer network, help partners get started and earn network commissions according to your approved distributor agreement.</p>
-                    <a class="text-link" href="register.html?role=distributor">Apply for a Distributor ID <span aria-hidden="true">→</span></a>
-                </article>
-            </div>
-        </section>
+                                        <ul class="role-perks"><li>Onboard and manage retailers</li><li>Network commission tracking</li><li>Priority partner support</li></ul>
+                                        <a class="text-link" href="register.html?role=distributor">Apply for a Distributor ID <span aria-hidden="true">→</span></a>
+                                    </article>
+                                </div>
+                            </section>
+
+                            <section class="download-section" id="download-app" aria-labelledby="download-title">
+                                <div class="download-copy">
+                                    <p class="eyebrow">DOWNLOAD YOUR APPS</p>
+                                    <h2 id="download-title">Take R.M Digital Centre everywhere.</h2>
+                                    <p>Install the portal as an app on your phone or computer for faster access, a home-screen icon and offline-ready pages.</p>
+                                    <div class="download-buttons">
+                                        <button class="btn primary install-app-button" id="install-app-button" type="button" hidden>Install app</button>
+                                        <a class="btn quiet" href="login.html">Open portal</a>
+                                    </div>
+                                    <p class="install-app-status form-status" id="install-app-status" role="status" aria-live="polite" hidden></p>
+                                    <p class="download-hint">Android &amp; desktop: tap Install. iPhone: Share, then Add to Home Screen.</p>
+                                </div>
+                            </section>
     </main>
 
     <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. All rights reserved.</p><p>Services are subject to provider availability and applicable terms.</p></footer>
+    <dialog class="service-modal" id="service-modal" aria-labelledby="service-modal-title">
+        <div class="service-modal-card">
+            <button type="button" class="service-modal-close" id="service-modal-close" aria-label="Close">&times;</button>
+            <div id="service-modal-body"></div>
+        </div>
+    </dialog>
     <script src="app.js"></script>
+    <script src="home-services.js"></script>
 </body>
 </html>

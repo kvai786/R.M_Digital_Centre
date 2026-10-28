@@ -25,7 +25,7 @@
             <p class="form-intro">Your Retailer session is missing or expired.</p><a class="btn primary" href="login.html">Go to login</a>
         </section>
         <div id="retailer-profile-content" hidden>
-            <div class="dashboard-heading"><div><p class="eyebrow">OFFICIAL PARTNER PROFILE</p><h1 id="retailer-welcome">Retailer profile</h1><p>Review the contact details recorded for your Retail ID and your Master Distributor upline.</p></div></div>
+            <div class="dashboard-heading"><div><p class="eyebrow">OFFICIAL PARTNER PROFILE</p><h1 id="retailer-welcome">Retailer profile</h1><p>Review the contact details recorded for your Retail ID and your assigned Distributor.</p></div></div>
             <section class="profile-grid" aria-label="Retailer profile details">
                 <article class="profile-card"><p class="eyebrow">RETAILER DETAILS</p><dl>
                     <div><dt>Retail ID</dt><dd id="retailer-profile-id"></dd></div>
@@ -33,11 +33,26 @@
                     <div><dt>Mobile number</dt><dd id="retailer-profile-mobile"></dd></div>
                     <div><dt>Email address</dt><dd id="retailer-profile-email"></dd></div>
                 </dl></article>
-                <article class="profile-card"><p class="eyebrow">UPLINE DETAILS</p><dl>
-                    <div><dt>Master Distributor</dt><dd>RAHAMTULLA MONDAL</dd></div>
-                    <div><dt>Mobile number</dt><dd>8509010483</dd></div>
-                    <div><dt>Email address</dt><dd id="upline-email">Not configured</dd></div>
-                </dl><button class="btn secondary" type="button" id="change-upline-request">Request Upline change</button></article>
+                <article class="profile-card"><p class="eyebrow">OFFICIAL HELPLINE</p><dl>
+                    <div><dt>Helpline number</dt><dd id="partner-helpline">Not available</dd></div>
+                </dl></article>
+                <article class="profile-card" id="assigned-distributor-card" hidden><p class="eyebrow">YOUR DISTRIBUTOR</p><dl>
+                    <div><dt>Name</dt><dd id="distributor-name"></dd></div>
+                    <div><dt>Distributor ID</dt><dd id="distributor-id"></dd></div>
+                    <div><dt>Contact</dt><dd id="distributor-mobile"></dd></div>
+                    <div><dt>Area / region</dt><dd id="distributor-area"></dd></div>
+                </dl></article>
+            </section>
+            <section class="dashboard-section" aria-labelledby="ticket-title">
+                <div class="section-heading"><div><p class="eyebrow">SUPPORT</p><h2 id="ticket-title">Raise a support ticket or complaint</h2></div></div>
+                <form class="whitelist-form support-ticket-form" id="support-ticket-form">
+                    <div class="field"><label for="ticket-category">Type</label><select id="ticket-category" name="category"><option value="support">Support</option><option value="complaint">Complaint</option><option value="service">Service</option><option value="other">Other</option></select></div>
+                    <div class="field"><label for="ticket-subject">Subject</label><input id="ticket-subject" name="subject" minlength="3" maxlength="100" required></div>
+                    <div class="field"><label for="ticket-message">Details</label><textarea id="ticket-message" name="message" minlength="5" maxlength="1000" rows="4" required></textarea></div>
+                    <button class="btn primary" type="submit">Submit ticket</button>
+                </form>
+                <p class="form-status" id="ticket-status" role="status" aria-live="polite" hidden></p>
+                <div id="my-ticket-list" class="application-list" aria-live="polite"></div>
             </section>
             <p class="form-status" id="retailer-profile-status" role="status" aria-live="polite" hidden></p>
             <p class="data-handling-note">For account or profile changes, contact support using an independently verified channel. Never share your password, OTP, Aadhaar number, or banking PIN.</p>

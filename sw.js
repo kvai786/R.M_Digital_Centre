@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "rm-digital-centre-v12";
+const CACHE_NAME = "rm-digital-centre-v19";
 const APP_SHELL = [
     "./",
     "./index.html",
@@ -10,6 +10,7 @@ const APP_SHELL = [
     "./retailer.html",
     "./styles.css",
     "./app.js",
+    "./home-services.js",
     "./manifest.json",
     "./icon.svg",
     "./icon-192.png",

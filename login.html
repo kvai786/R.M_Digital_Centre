@@ -21,26 +21,48 @@
     </header>
     <main id="main-content" class="form-page">
         <section class="form-card" aria-labelledby="page-title">
-            <p class="eyebrow">PARTNER PORTAL</p>
-            <h1 id="page-title">Welcome back</h1>
-            <p class="form-intro">Sign in with your staff mobile number or official Retail ID.</p>
+            <h1 id="page-title">R.M Digital Centre - Partner Portal</h1>
             <form id="portal-login-form" novalidate>
-                <div class="field"><label for="login-mobile">Mobile number or Retail ID</label><input id="login-mobile" name="mobile" autocomplete="username" maxlength="20" required></div>
+                <div class="field"><label for="login-name">Name <small>(first-time access), or registered mobile (pending application)</small></label><input id="login-name" name="name" autocomplete="off" maxlength="80"></div>
+                <div class="field"><label for="login-mobile">Mobile number, Retail ID or Application ID</label><input id="login-mobile" name="mobile" autocomplete="username" maxlength="20" required></div>
                 <button class="btn primary form-submit" type="submit">Continue</button>
             </form>
+            <div id="login-welcome" class="login-welcome" role="status" aria-live="polite" hidden>
+                <p>Welcome, <strong id="login-welcome-name"></strong></p>
+                <p class="form-intro">Verified. Opening your dashboard...</p>
+            </div>
             <form id="login-password-form" class="flow-step" hidden>
-                <p class="account-step-label" id="login-account-label"></p>
-                <div class="field" id="login-name-field" hidden><label for="login-name">Authorized Sub-Admin name</label><input id="login-name" name="name" autocomplete="name"></div>
                 <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
                 <button class="btn primary form-submit" type="submit">Sign in</button>
                 <button class="text-button" type="button" id="forgot-password">Forgot password?</button>
                 <button class="text-button" type="button" id="change-number">Use a different number</button>
             </form>
+            <form id="two-factor-form" class="flow-step" hidden>
+                <h2 id="two-factor-title">Verification code</h2>
+                <div id="two-factor-enroll" hidden>
+                    <p class="form-intro">Scan this one-time QR code with Google Authenticator or Microsoft Authenticator, then enter the 6-digit code shown. This QR code is displayed only once and is locked after verification.</p>
+                    <img id="two-factor-qr" class="two-factor-qr" alt="Authenticator setup QR code" width="200" height="200">
+                    <p class="form-intro">Cannot scan? Enter this key manually: <code id="two-factor-key"></code></p>
+                </div>
+                <p class="form-intro" id="two-factor-verify-intro" hidden>Enter the current 6-digit code from your authenticator app.</p>
+                <div class="field"><label for="two-factor-code">6-digit code</label><input id="two-factor-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></div>
+                <button class="btn primary form-submit" type="submit">Verify and sign in</button>
+                <button class="text-button" type="button" id="two-factor-cancel">Cancel</button>
+            </form>
+            <form id="staff-setup-form" class="flow-step" hidden>
+                <h2>Set your secure password</h2>
+                <p class="form-intro">Choose a strong password and recovery phrase. Your setup will then be sent for final owner approval.</p>
+                <div class="field"><label for="staff-setup-password">New password</label><input id="staff-setup-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <div class="field"><label for="staff-setup-password-confirm">Confirm password</label><input id="staff-setup-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+                <div class="field"><label for="staff-setup-recovery">Recovery phrase (12+ characters)</label><input id="staff-setup-recovery" name="recovery" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
+                <div class="field"><label for="staff-setup-recovery-confirm">Confirm recovery phrase</label><input id="staff-setup-recovery-confirm" name="recoveryConfirm" type="password" autocomplete="off" minlength="12" maxlength="256" required></div>
+                <button class="btn primary form-submit" type="submit">Submit setup confirmation</button>
+                <button class="text-button" type="button" id="staff-setup-back">Cancel</button>
+            </form>
             <form id="first-time-setup-form" class="flow-step" hidden>
                 <h2 id="setup-title">Set up your password</h2>
-                <p class="form-intro">Use the one-time setup code provided by the Master Admin, then choose a strong password and recovery phrase. Keep both codes private.</p>
-                <div class="field" id="setup-name-field" hidden><label for="setup-name">Full name</label><input id="setup-name" name="name" autocomplete="name"></div>
-                <div class="field" id="bootstrap-token-field" hidden><label for="bootstrap-token">One-time Master Admin setup token</label><input id="bootstrap-token" name="bootstrapToken" type="password" autocomplete="off" maxlength="256"></div>
+                <p class="form-intro">Enter the one-time setup code you were given, then choose a strong password and recovery phrase. Keep both private.</p>
+                <div class="field" id="bootstrap-token-field" hidden><label for="bootstrap-token">One-time owner setup token</label><input id="bootstrap-token" name="bootstrapToken" type="password" autocomplete="off" maxlength="256"></div>
                 <div class="field" id="activation-token-field" hidden><label for="activation-token">One-time account setup code</label><input id="activation-token" name="activationToken" type="password" autocomplete="off" maxlength="256"></div>
                 <div class="field"><label for="setup-password">New password</label><input id="setup-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
                 <div class="field"><label for="setup-password-confirm">Confirm password</label><input id="setup-password-confirm" name="passwordConfirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
@@ -70,15 +92,8 @@
                 <button class="btn primary form-submit" type="submit">Reset password</button>
                 <button class="text-button" type="button" id="cancel-recovery">Return to login</button>
             </form>
-            <form id="operator-setup-form" class="flow-step" hidden>
-                <h2>Request Sub-Admin setup</h2>
-                <p class="form-intro">The name and locked mobile must match an identity already authorized by the Master Admin. The Master Admin must accept the request before password setup is enabled.</p>
-                <div class="field"><label for="operator-name">Full name</label><input id="operator-name" name="name" autocomplete="name" required></div>
-                <div class="field"><label for="operator-mobile">Operator mobile number</label><input id="operator-mobile" name="mobile" type="tel" readonly></div>
-                <button class="btn primary form-submit" type="submit">Request Master approval</button>
-            </form>
             <p class="form-status" id="login-status" role="status" aria-live="polite" hidden></p>
-            <p class="data-handling-note">Sign-in is managed by the server. Never share your password, recovery phrase, or one-time setup token.</p>
+            <p class="data-handling-note">Sign-in is managed by the server. Never share your password, recovery phrase, or one-time codes.</p>
             <p class="form-note">Not a partner yet? <a href="register.html">Apply for a Retailer or Distributor ID</a>.</p>
             <button class="install-app-button" id="install-app-button" type="button" hidden>Install app</button>
             <p class="install-app-status form-status" id="install-app-status" role="status" aria-live="polite" hidden></p>

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from hashlib import scrypt, sha256
-from hmac import compare_digest
+from hmac import compare_digest, new as hmac_new
+import base64
 from io import BytesIO
 import json
 import logging
@@ -21,14 +23,21 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, select
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, func, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
+import pyotp
+import qrcode
 from cryptography.fernet import Fernet, InvalidToken
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.responses import StreamingResponse
 
+from assistant_triage import RateLimiter, handle_chat
+
+ASSISTANT_LIMITER = RateLimiter(limit=15, window_seconds=60)
 BASE_DIR = Path(__file__).resolve().parent
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
@@ -45,8 +54,7 @@ UTC = timezone.utc
 STATE_KEYS = {
     "rm-demo-applications", "rm-demo-blocked-partner-mobiles",
     "rm-demo-distributor-pin-mappings", "rm-demo-distributor-notifications",
-    "rm-demo-sub-admins", "rm-demo-operator-requests",
-    "rm-demo-sub-admin-whitelist", "rm-demo-approvals",
+    "rm-demo-approvals",
     "rm-demo-retail-profiles", "rm-demo-master-contact",
     "rm-demo-upline-requests", "rm-demo-service-requests",
 }
@@ -57,10 +65,40 @@ DOCUMENT_FIELDS = {
     "businessRegistration": "Business registration / GST proof",
     "bankProof": "Bank proof / cancelled cheque",
     "officeProof": "Office premises proof",
+    "retailerKycMasked": "Masked Aadhaar / PAN copy",
+    "distributorKyc": "Distributor KYC (masked Aadhaar / PAN)",
 }
+RETAILER_DOCUMENTS = (
+    "retailerIdentity", "retailerAddressProof", "retailerBusinessProof", "retailerKycMasked",
+)
+DISTRIBUTOR_DOCUMENTS = (
+    "retailerIdentity", "retailerAddressProof", "retailerBusinessProof",
+    "businessRegistration", "bankProof", "officeProof", "distributorKyc",
+)
+STAFF_ROLES = {"master", "masteradmin", "subadmin"}
+TWO_FACTOR_ROLES = {"masteradmin", "subadmin"}
+# Every staff identity that must pass TOTP before a session is issued; the owner has no staff authorization row.
+MFA_LOGIN_ROLES = {"master"} | TWO_FACTOR_ROLES
+PREAUTH_LIFETIME_SECONDS = 300
+TOTP_ISSUER = "R.M Digital Centre"
+HELPLINE_KEY = "helpline"
+SUPPORT_TICKETS_KEY = "rm-support-tickets"
+KYC_RETENTION_DAYS = 7
+KYC_PURGE_STATUSES = {"approved", "rejected", "blocked"}
+CSRF_COOKIE_NAME = "rm_csrf"
+CSRF_EXEMPT_PATHS = {
+    "/api/auth/login", "/api/auth/lookup", "/api/auth/setup", "/api/auth/bootstrap",
+    "/api/auth/recover", "/api/retailer/activate", "/api/auth/staff-setup",
+    "/api/auth/2fa/enroll-start", "/api/auth/2fa/enroll-verify", "/api/auth/2fa/verify",
+    "/api/applications", "/api/service-enquiries", "/api/scan-document",
+}
+APPLICATION_RATE_LIMIT = 10
+APPLICATION_RATE_WINDOW = timedelta(hours=1)
+_application_hits: dict[str, list[datetime]] = {}
 STATIC_FILES = {
     "index.html", "login.html", "register.html", "admin.html", "retailer.html",
-    "styles.css", "app.js", "manifest.json", "sw.js", "icon.svg",
+    "dashboard.html", "dashboard.css", "dashboard.js",
+    "styles.css", "app.js", "home-services.js", "manifest.json", "sw.js", "icon.svg",
     "icon-192.png", "icon-512.png",
 }
 APPLICATIONS_KEY = "rm-demo-applications"
@@ -148,7 +186,33 @@ class User(Base):
     setup_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     setup_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True)
+    totp_secret: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    totp_enrolled: Mapped[bool] = mapped_column(default=False)
+    totp_last_step: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class StaffAuthorization(Base):
+    __tablename__ = "staff_authorizations"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    mobile: Mapped[str] = mapped_column(String(15), unique=True, index=True)
+    scope: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    created_by: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    setup_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class SiteSetting(Base):
+    __tablename__ = "site_settings"
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[str] = mapped_column(String(200), default="")
+    updated_by: Mapped[str] = mapped_column(String(36), default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
@@ -184,6 +248,18 @@ class CustomerDocument(Base):
     sha256_hex: Mapped[str] = mapped_column(String(64))
     storage_key: Mapped[str] = mapped_column(String(80), unique=True)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actor_id: Mapped[str] = mapped_column(String(36), index=True)
+    actor_role: Mapped[str] = mapped_column(String(20))
+    action: Mapped[str] = mapped_column(String(40), index=True)
+    target: Mapped[str] = mapped_column(String(80), index=True)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class TransactionDocument(Base):
@@ -247,10 +323,37 @@ class RecoveryInput(InputModel):
     recovery: str = Field(min_length=12, max_length=256)
 
 
-class OperatorRequestInput(InputModel):
+class StaffSetupInput(InputModel):
     name: str = Field(min_length=2, max_length=80)
-    mobile: str = Field(pattern=r"^\d{10,15}$")
+    mobile: str = Field(pattern=r"^\d{10}$")
+    password: str = Field(min_length=12, max_length=128)
+    recovery: str = Field(min_length=12, max_length=256)
 
+
+class TwoFactorInput(InputModel):
+    preAuth: str = Field(min_length=20, max_length=300)
+    code: str = Field(default="", max_length=8)
+
+
+class StaffAuthorizationInput(InputModel):
+    role: str = Field(pattern=r"^(masteradmin|subadmin)$")
+    name: str = Field(min_length=2, max_length=80)
+    mobile: str = Field(pattern=r"^\d{10}$")
+    scope: str = Field(min_length=2, max_length=120)
+
+
+class StaffActionInput(InputModel):
+    action: str = Field(pattern=r"^(approve|reject|revoke|reset)$")
+
+
+class HelplineInput(InputModel):
+    phone: str = Field(pattern=r"^\+?[0-9][0-9 \-]{6,18}[0-9]$")
+
+
+class SupportTicketInput(InputModel):
+    category: str = Field(pattern=r"^(complaint|support|service|other)$")
+    subject: str = Field(min_length=3, max_length=100)
+    message: str = Field(min_length=5, max_length=1000)
 
 class StateInput(InputModel):
     value: list[dict[str, Any]]
@@ -267,6 +370,26 @@ class ApplicationInput(InputModel):
     operationalPin: str = Field(default="", pattern=r"^$|^\d{6}$")
     servicePincodes: list[str] = Field(default_factory=list, max_length=100)
     correctionReference: str = Field(default="", max_length=80)
+    idType: str = Field(default="", pattern=r"^(aadhaar|pan)?$")
+    idLast4: str = Field(default="", pattern=r"^[A-Za-z0-9]{0,4}$")
+    jurisdiction: str = Field(default="", max_length=120)
+    referralCode: str = Field(default="", max_length=40)
+    mobileConfirmed: bool = False
+    privacyAccepted: bool = False
+    website: str = Field(default="", max_length=200)
+    @classmethod
+    def normalize_required_text(cls, value: str, info: ValidationInfo) -> str:
+        normalized = value.strip()
+        minimum_lengths = {"name": 2, "business": 2, "address": 5, "city": 2}
+        field_name = info.field_name
+        if field_name is None:
+            raise ValueError("Required text field is invalid.")
+        if len(normalized) < minimum_lengths[field_name]:
+            raise ValueError(
+                f"{field_name.title()} must contain at least "
+                f"{minimum_lengths[field_name]} characters."
+            )
+        return normalized
 
     @field_validator("servicePincodes")
     @classmethod
@@ -294,6 +417,15 @@ class UplineRequestInput(InputModel):
     reason: str = Field(default="", max_length=1000)
 
 
+class PartnerActionInput(InputModel):
+    action: str = Field(pattern=r"^(approve|reject|suspend|reactivate)$")
+    reason: str = Field(default="", max_length=500)
+
+
+class ReassignInput(InputModel):
+    distributorApplicationId: str = Field(default="", max_length=80)
+
+
 def get_db():
     with SessionLocal() as db:
         yield db
@@ -310,6 +442,7 @@ def document_public_data(document: CustomerDocument | TransactionDocument) -> di
     }
     if isinstance(document, CustomerDocument):
         result["revision"] = document.revision
+        result["purgedAt"] = document.purged_at.isoformat() if document.purged_at else None
     return result
 
 
@@ -375,7 +508,7 @@ def record_value(db: Session, key: str) -> list[dict[str, Any]]:
     if row:
         return row.value
     if key == "rm-demo-master-contact":
-        return [{"name": "RAHAMTULLA MONDAL", "mobile": MASTER_ADMIN_MOBILE, "email": ""}]
+        return []
     return []
 
 
@@ -388,10 +521,11 @@ def save_record(db: Session, key: str, value: list[dict[str, Any]]) -> None:
         row.updated_at = utc_now()
 
 
+PASSWORD_HASHER = PasswordHasher()
+
+
 def hash_secret(secret: str) -> str:
-    salt = secrets.token_bytes(16)
-    hashed = scrypt(secret.encode(), salt=salt, n=2**15, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024)
-    return f"scrypt$32768$8$1${salt.hex()}${hashed.hex()}"
+    return PASSWORD_HASHER.hash(secret)
 
 
 DUMMY_PASSWORD_HASH = hash_secret("Not-a-real-password-123!")
@@ -400,7 +534,13 @@ DUMMY_PASSWORD_HASH = hash_secret("Not-a-real-password-123!")
 def verify_secret(secret: str, encoded: str | None) -> bool:
     if not encoded:
         return False
+    if encoded.startswith("$argon2"):
+        try:
+            return PASSWORD_HASHER.verify(encoded, secret)
+        except (VerificationError, InvalidHashError):
+            return False
     try:
+        # Legacy scrypt hashes remain verifiable so they can be upgraded on next sign-in.
         algorithm, n, r, p, salt, expected = encoded.split("$")
         if algorithm != "scrypt":
             return False
@@ -411,6 +551,13 @@ def verify_secret(secret: str, encoded: str | None) -> bool:
         return compare_digest(actual.hex(), expected)
     except (ValueError, TypeError):
         return False
+
+
+def upgrade_hash_if_needed(user: User, secret: str) -> None:
+    if user.password_hash and (
+        not user.password_hash.startswith("$argon2") or PASSWORD_HASHER.check_needs_rehash(user.password_hash)
+    ):
+        user.password_hash = hash_secret(secret)
 
 
 def issue_setup_token(user: User) -> str | None:
@@ -492,18 +639,182 @@ def role_required(*roles: str):
     return dependency
 
 
+def csrf_secret() -> bytes:
+    return (os.getenv("CSRF_SECRET") or os.getenv("DOCUMENT_ENCRYPTION_KEY", "")).encode()
+
+
+def csrf_token_for(raw_session: str) -> str:
+    return hmac_new(csrf_secret(), b"csrf|" + raw_session.encode(), sha256).hexdigest()
+
+
 def create_session(db: Session, response: Response, user: User) -> None:
     raw = secrets.token_urlsafe(48)
+    # Single-session enforcement: signing in revokes every earlier session.
+    db.query(PortalSession).filter(PortalSession.user_id == user.id).delete()
     db.add(PortalSession(
         token_hash=sha256(raw.encode()).hexdigest(),
         user_id=user.id,
         expires_at=utc_now() + SESSION_LIFETIME,
     ))
     db.commit()
+    max_age = int(SESSION_LIFETIME.total_seconds())
     response.set_cookie(
-        COOKIE_NAME, raw, httponly=True, secure=COOKIE_SECURE, samesite="lax",
-        max_age=int(SESSION_LIFETIME.total_seconds()), path="/",
+        COOKIE_NAME, raw, httponly=True, secure=COOKIE_SECURE, samesite="strict",
+        max_age=max_age, path="/",
     )
+    response.set_cookie(
+        CSRF_COOKIE_NAME, csrf_token_for(raw), httponly=False, secure=COOKIE_SECURE,
+        samesite="strict", max_age=max_age, path="/",
+    )
+
+
+def record_audit(db: Session, actor: User, action: str, target: str, detail: dict[str, Any] | None = None) -> None:
+    db.add(AuditLog(
+        actor_id=actor.id, actor_role=actor.role, action=action, target=target[:80],
+        detail=detail or {}, created_at=utc_now(),
+    ))
+
+
+def ensure_schema_columns() -> None:
+    columns = {column["name"] for column in inspect(engine).get_columns("customer_documents")}
+    if "purged_at" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE customer_documents ADD COLUMN purged_at TIMESTAMP"))
+    user_columns = {column["name"] for column in inspect(engine).get_columns("users")}
+    additions = {
+        "totp_secret": "VARCHAR(300)",
+        "totp_enrolled": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "totp_last_step": "INTEGER NOT NULL DEFAULT 0",
+    }
+    with engine.begin() as connection:
+        for name, definition in additions.items():
+            if name not in user_columns:
+                connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {definition}"))
+
+
+def make_preauth_token(user: User) -> str:
+    expires = int(utc_now().timestamp()) + PREAUTH_LIFETIME_SECONDS
+    fingerprint = sha256((user.password_hash or "").encode()).hexdigest()[:16]
+    payload = f"{user.id}.{expires}"
+    signature = hmac_new(csrf_secret(), f"preauth|{payload}|{fingerprint}".encode(), sha256).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def user_from_preauth(db: Session, token: str) -> User:
+    invalid = HTTPException(status_code=401, detail="Sign in again to continue.")
+    try:
+        user_id, expires, signature = token.split(".")
+        if int(expires) < utc_now().timestamp():
+            raise invalid
+    except ValueError as error:
+        raise invalid from error
+    user = db.get(User, user_id)
+    if not user or not user.is_active or user.role not in MFA_LOGIN_ROLES:
+        raise invalid
+    fingerprint = sha256((user.password_hash or "").encode()).hexdigest()[:16]
+    expected = hmac_new(csrf_secret(), f"preauth|{user_id}.{expires}|{fingerprint}".encode(), sha256).hexdigest()
+    if not compare_digest(signature, expected):
+        raise invalid
+    return user
+
+
+def staff_authorization_for(db: Session, user: User) -> StaffAuthorization | None:
+    return db.scalar(select(StaffAuthorization).where(StaffAuthorization.mobile == user.mobile))
+
+
+def totp_for(user: User) -> pyotp.TOTP:
+    secret = document_fernet().decrypt((user.totp_secret or "").encode()).decode()
+    return pyotp.TOTP(secret)
+
+
+def check_totp(user: User, code: str) -> bool:
+    """Accept a code once per 30-second step (replay protection)."""
+    if not re.fullmatch(r"\d{6}", code or "") or not user.totp_secret:
+        return False
+    try:
+        totp = totp_for(user)
+    except InvalidToken:
+        return False
+    now = utc_now().timestamp()
+    for offset in (-1, 0, 1):
+        step = int(now // 30) + offset
+        if compare_digest(totp.at(step * 30), code):
+            if step <= user.totp_last_step:
+                return False
+            user.totp_last_step = step
+            return True
+    return False
+
+
+def qr_data_uri(content: str) -> str:
+    image = qrcode.make(content)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def get_helpline(db: Session) -> str:
+    row = db.get(SiteSetting, HELPLINE_KEY)
+    return row.value if row else ""
+
+
+def purge_customer_documents(db: Session, documents: list[CustomerDocument]) -> int:
+    """Delete stored KYC files, keeping only audit metadata (hash, size, timestamps)."""
+    storage_dir = document_storage_dir()
+    now = utc_now()
+    purged: dict[str, set[str]] = {}
+    for document in documents:
+        if document.purged_at:
+            continue
+        (storage_dir / document.storage_key).unlink(missing_ok=True)
+        document.purged_at = now
+        document.original_filename = "[purged]"
+        purged.setdefault(document.application_id, set()).add(document.id)
+    for application_id, document_ids in purged.items():
+        row = db.get(Application, application_id)
+        if not row:
+            continue
+        payload = json.loads(json.dumps(row.payload))
+        entries = list(payload.get("documents", []))
+        for revision in payload.get("revisionHistory", []):
+            entries.extend(revision.get("documents", []))
+        for entry in entries:
+            if entry.get("id") in document_ids:
+                entry["fileName"] = "[purged]"
+                entry["purgedAt"] = now.isoformat()
+        row.payload = payload
+    return sum(len(ids) for ids in purged.values())
+
+
+def purge_application_documents(db: Session, application_id: str) -> int:
+    documents = list(db.scalars(select(CustomerDocument).where(
+        CustomerDocument.application_id == application_id, CustomerDocument.purged_at.is_(None),
+    )))
+    return purge_customer_documents(db, documents)
+
+
+def run_document_purge() -> int:
+    retention = positive_integer_setting("KYC_RETENTION_DAYS", KYC_RETENTION_DAYS, 1, KYC_RETENTION_DAYS)
+    cutoff = utc_now() - timedelta(days=retention)
+    with SessionLocal() as db:
+        expired = list(db.scalars(select(CustomerDocument).where(
+            CustomerDocument.purged_at.is_(None), CustomerDocument.uploaded_at < cutoff,
+        )))
+        count = purge_customer_documents(db, expired)
+        db.commit()
+    if count:
+        LOGGER.info("Purged %d expired KYC document(s)", count)
+    return count
+
+
+async def document_purge_loop() -> None:
+    interval = positive_integer_setting("KYC_PURGE_INTERVAL_SECONDS", 3600, 60, 86400)
+    while True:
+        try:
+            await run_in_threadpool(run_document_purge)
+        except Exception:
+            LOGGER.exception("Scheduled KYC document purge failed")
+        await asyncio.sleep(interval)
 
 
 def check_origin(request: Request) -> None:
@@ -516,6 +827,39 @@ def check_origin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Cross-origin requests are not allowed.")
     if parsed.scheme not in {"http", "https"} or (forwarded_scheme == "https" and parsed.scheme != "https"):
         raise HTTPException(status_code=403, detail="Cross-origin requests are not allowed.")
+
+
+def throttle_key(request: Request, scope: str, identifier: str) -> str:
+    remote = request.client.host if request.client else "unknown"
+    return sha256(f"{scope}|{remote}|{identifier.casefold()}".encode()).hexdigest()
+
+
+def throttle_check(db: Session, key: str) -> None:
+    attempt = db.get(LoginAttempt, key)
+    locked_until = attempt.locked_until if attempt else None
+    if locked_until and locked_until.tzinfo is None:
+        locked_until = locked_until.replace(tzinfo=UTC)
+    if locked_until and locked_until > utc_now():
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
+
+
+def throttle_fail(db: Session, key: str) -> None:
+    attempt = db.get(LoginAttempt, key)
+    if attempt is None:
+        attempt = LoginAttempt(key=key, failures=0)
+        db.add(attempt)
+    attempt.failures += 1
+    if attempt.failures >= LOGIN_FAILURE_LIMIT:
+        attempt.failures = 0
+        attempt.locked_until = utc_now() + LOGIN_LOCK_TIME
+    db.commit()
+
+
+def throttle_clear(db: Session, key: str) -> None:
+    attempt = db.get(LoginAttempt, key)
+    if attempt:
+        db.delete(attempt)
+        db.commit()
 
 
 def application_values(db: Session) -> list[dict[str, Any]]:
@@ -531,9 +875,14 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     if system() != "Windows":
         storage_dir.chmod(0o700)
     Base.metadata.create_all(engine)
+    ensure_schema_columns()
     with SessionLocal() as db:
         db.execute(select(1))
+    purge_task = asyncio.create_task(document_purge_loop())
     yield
+    purge_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await purge_task
     engine.dispose()
 
 
@@ -547,6 +896,11 @@ async def security_middleware(request: Request, call_next):
             check_origin(request)
         except HTTPException as error:
             return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+        session_cookie = request.cookies.get(COOKIE_NAME)
+        if session_cookie and request.url.path not in CSRF_EXEMPT_PATHS:
+            supplied = request.headers.get("x-csrf-token", "")
+            if not compare_digest(supplied, csrf_token_for(session_cookie)):
+                return JSONResponse(status_code=403, content={"detail": "A valid CSRF token is required."})
     if request.url.path in {"/api/applications", "/api/transactions"}:
         content_length = request.headers.get("content-length")
         if content_length:
@@ -560,6 +914,11 @@ async def security_middleware(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers.setdefault("Content-Security-Policy", (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
+        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    ))
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     if COOKIE_SECURE:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.url.path.startswith("/api/"):
@@ -576,7 +935,7 @@ def health(db: Session = Depends(get_db)) -> dict[str, str]:
 
 @app.get("/api/public/config")
 def public_config() -> dict[str, str]:
-    return {"masterAdminMobile": MASTER_ADMIN_MOBILE}
+    return {"portalName": "R.M Digital Centre - Partner Portal"}
 
 
 @app.get("/api/auth/me")
@@ -585,29 +944,36 @@ def auth_me(user: User = Depends(current_user)) -> dict[str, Any]:
 
 
 @app.post("/api/auth/lookup")
-def auth_lookup(body: AuthInput, db: Session = Depends(get_db)) -> dict[str, Any]:
+def auth_lookup(body: AuthInput, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Stealth lookup: every unknown or non-actionable identifier gets the same generic password step."""
     identifier = normalized_identifier(body.identifier)
+    key = throttle_key(request, "lookup", identifier)
+    throttle_check(db, key)
+    throttle_fail(db, key)
+    generic = {"step": "password", "identifier": identifier}
     user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
-    if user is None and identifier == MASTER_ADMIN_MOBILE:
-        return {
-            "role": "master", "name": "Master Admin", "identifier": MASTER_ADMIN_MOBILE,
-            "mobile": MASTER_ADMIN_MOBILE, "passwordSet": False, "canSetup": True,
-        }
-    if not user or not user.is_active:
-        raise HTTPException(status_code=404, detail="Account could not be verified. Check the details or contact support.")
-    if user.role == "subadmin":
-        authorized = any(
-            item.get("mobile") == user.mobile and item.get("status") == "active"
-            and item.get("name", "").strip().casefold() == user.name.strip().casefold()
-            for item in record_value(db, "rm-demo-sub-admin-whitelist")
-        )
-        if not authorized:
-            raise HTTPException(status_code=403, detail="This Sub-Admin account is not currently authorized.")
-    return {
-        "role": user.role, "name": user.name, "identifier": user.retail_id or user.mobile,
-        "mobile": user.mobile, "passwordSet": user.password_hash is not None,
-        "canSetup": user.password_hash is None,
-    }
+    if user is None and identifier == MASTER_ADMIN_MOBILE and not db.scalar(select(User).where(User.role == "master")):
+        return {"step": "bootstrap", "identifier": identifier}
+    if user is None:
+        pending = db.scalar(select(StaffAuthorization).where(
+            StaffAuthorization.mobile == identifier,
+            StaffAuthorization.status == "whitelisted_pending_setup",
+        ))
+        if pending and body.name.strip() and body.name.strip().casefold() == pending.name.strip().casefold():
+            return {"step": "staff_setup", "identifier": identifier}
+        return generic
+    if user.role == "retailer" and user.is_active and user.password_hash is None:
+        return {"step": "activate", "identifier": identifier}
+    if user.role == "distributor" and user.is_active and user.password_hash is None:
+        return {"step": "setup", "identifier": identifier}
+    if user.role in TWO_FACTOR_ROLES and user.password_hash is None:
+        authorization = staff_authorization_for(db, user)
+        if (
+            authorization and authorization.status == "whitelisted_pending_setup"
+            and body.name.strip().casefold() == authorization.name.strip().casefold()
+        ):
+            return {"step": "staff_setup", "identifier": identifier}
+    return generic
 
 
 @app.post("/api/auth/bootstrap")
@@ -635,34 +1001,29 @@ def bootstrap_master(
     user.updated_at = utc_now()
     db.commit()
     db.refresh(user)
-    create_session(db, response, user)
-    return {"user": session_user_data(user)}
+    # No session yet: the owner must enroll the authenticator first.
+    return {"twoFactor": "enroll", "preAuth": make_preauth_token(user)}
 
 
 @app.post("/api/auth/setup")
 def setup_account(
-    body: AuthInput, response: Response, db: Session = Depends(get_db),
+    body: AuthInput, request: Request, response: Response, db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     identifier = normalized_identifier(body.identifier)
+    setup_key = throttle_key(request, "setup", identifier)
+    throttle_check(db, setup_key)
     user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
     if not user or not user.is_active or user.password_hash:
         raise HTTPException(status_code=409, detail="This account is not eligible for first-time password setup.")
-    if user.role == "master":
-        raise HTTPException(status_code=403, detail="Use the one-time Master Admin setup flow.")
-    if user.role == "subadmin":
-        authorized = any(
-            item.get("mobile") == user.mobile and item.get("status") == "active"
-            and item.get("name", "").strip().casefold() == user.name.strip().casefold()
-            for item in record_value(db, "rm-demo-sub-admin-whitelist")
-        )
-        operator = next((item for item in record_value(db, "rm-demo-sub-admins")
-                         if item.get("mobile") == user.mobile and item.get("status") == "active"), None)
-        if not authorized or not operator:
-            raise HTTPException(status_code=403, detail="Sub-Admin access has not been approved.")
-        if body.name.strip().casefold() != user.name.strip().casefold():
-            raise HTTPException(status_code=403, detail="The Sub-Admin name does not match the authorized account.")
+    if user.role in {"master"} | TWO_FACTOR_ROLES:
+        raise HTTPException(status_code=403, detail="Use the owner-controlled staff setup flow.")
     password_policy(body.password)
-    consume_setup_token(user, body.activationToken)
+    try:
+        consume_setup_token(user, body.activationToken)
+    except HTTPException:
+        throttle_fail(db, setup_key)
+        raise
+    throttle_clear(db, setup_key)
     user.password_hash = hash_secret(body.password)
     user.recovery_hash = hash_secret(body.recovery) if len(body.recovery) >= 12 else None
     user.updated_at = utc_now()
@@ -686,15 +1047,9 @@ def login(
     if locked_until and locked_until > now:
         raise HTTPException(status_code=429, detail="Too many sign-in attempts. Try again later.")
     user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
-    if user and user.role == "subadmin":
-        authorized = any(
-            item.get("mobile") == user.mobile and item.get("status") == "active"
-            and item.get("name", "").strip().casefold() == user.name.strip().casefold()
-            for item in record_value(db, "rm-demo-sub-admin-whitelist")
-        )
-        if not authorized:
-            user = None
-        elif body.name.strip().casefold() != user.name.strip().casefold():
+    if user and user.role in TWO_FACTOR_ROLES:
+        authorization = staff_authorization_for(db, user)
+        if not authorization or authorization.status not in {"ready_for_2fa", "active"}:
             user = None
     valid = verify_secret(body.password, user.password_hash if user else DUMMY_PASSWORD_HASH)
     if not user or not user.is_active or not user.password_hash or not valid:
@@ -706,20 +1061,116 @@ def login(
             attempt.failures = 0
             attempt.locked_until = now + LOGIN_LOCK_TIME
         db.commit()
-        raise HTTPException(status_code=401, detail="Mobile number or password is incorrect.")
+        # Pending status is revealed only to someone who knows both the application reference and its mobile.
+        if not user and body.name.strip():
+            application = db.get(Application, identifier[:80])
+            if (
+                application and application.status == "pending"
+                and compare_digest(application.mobile.encode(), body.name.strip().encode())
+            ):
+                raise HTTPException(status_code=403, detail="Aapki application abhi admin review mein hai.")
+        raise HTTPException(status_code=401, detail="Invalid credentials or mobile number.")
     if attempt:
         db.delete(attempt)
-        db.commit()
+    upgrade_hash_if_needed(user, body.password)
+    db.commit()
+    if user.role in MFA_LOGIN_ROLES:
+        return {
+            "twoFactor": "verify" if user.totp_enrolled else "enroll",
+            "preAuth": make_preauth_token(user),
+        }
     create_session(db, response, user)
     return {"user": session_user_data(user)}
 
 
+def finish_two_factor(db: Session, response: Response, user: User) -> dict[str, Any]:
+    authorization = staff_authorization_for(db, user)
+    if authorization and authorization.status != "active":
+        authorization.status = "active"
+        authorization.updated_at = utc_now()
+    user.updated_at = utc_now()
+    db.commit()
+    create_session(db, response, user)
+    return {"user": session_user_data(user)}
+
+
+def two_factor_throttle(request: Request, db: Session, user: User) -> str:
+    key = throttle_key(request, "2fa", user.id)
+    throttle_check(db, key)
+    return key
+
+
+def two_factor_stage_allowed(db: Session, user: User, stage: str) -> bool:
+    """Staff need an owner authorization state; the owner only needs to be enrolled (or not yet)."""
+    if user.role == "master":
+        return user.totp_enrolled if stage == "verify" else not user.totp_enrolled
+    authorization = staff_authorization_for(db, user)
+    required = "active" if stage == "verify" else "ready_for_2fa"
+    if stage == "verify":
+        return bool(user.totp_enrolled and authorization and authorization.status == required)
+    return bool(not user.totp_enrolled and authorization and authorization.status == required)
+
+
+@app.post("/api/auth/2fa/enroll-start")
+def two_factor_enroll_start(
+    body: TwoFactorInput, request: Request, db: Session = Depends(get_db),
+) -> dict[str, str]:
+    user = user_from_preauth(db, body.preAuth)
+    two_factor_throttle(request, db, user)
+    if not two_factor_stage_allowed(db, user, "enroll"):
+        raise HTTPException(status_code=409, detail="Authenticator setup is locked for this account.")
+    secret = pyotp.random_base32()
+    user.totp_secret = document_fernet().encrypt(secret.encode()).decode()
+    user.totp_last_step = 0
+    db.commit()
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user.mobile, issuer_name=TOTP_ISSUER)
+    return {"qr": qr_data_uri(uri), "manualKey": secret}
+
+
+@app.post("/api/auth/2fa/enroll-verify")
+def two_factor_enroll_verify(
+    body: TwoFactorInput, request: Request, response: Response, db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user = user_from_preauth(db, body.preAuth)
+    key = two_factor_throttle(request, db, user)
+    if not two_factor_stage_allowed(db, user, "enroll") or not user.totp_secret:
+        raise HTTPException(status_code=409, detail="Authenticator setup is locked for this account.")
+    if not check_totp(user, body.code):
+        db.rollback()
+        throttle_fail(db, key)
+        raise HTTPException(status_code=401, detail="The verification code is incorrect or expired.")
+    user.totp_enrolled = True
+    throttle_clear(db, key)
+    return finish_two_factor(db, response, user)
+
+
+@app.post("/api/auth/2fa/verify")
+def two_factor_verify(
+    body: TwoFactorInput, request: Request, response: Response, db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    user = user_from_preauth(db, body.preAuth)
+    key = two_factor_throttle(request, db, user)
+    if not two_factor_stage_allowed(db, user, "verify"):
+        raise HTTPException(status_code=409, detail="Authenticator verification is not available.")
+    if not check_totp(user, body.code):
+        db.rollback()
+        throttle_fail(db, key)
+        raise HTTPException(status_code=401, detail="The verification code is incorrect or expired.")
+    throttle_clear(db, key)
+    return finish_two_factor(db, response, user)
+
+
 @app.post("/api/auth/recover")
-def recover_password(body: RecoveryInput, db: Session = Depends(get_db)) -> dict[str, str]:
+def recover_password(body: RecoveryInput, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
     identifier = normalized_identifier(body.identifier)
+    key = throttle_key(request, "recover", identifier)
+    throttle_check(db, key)
     user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
-    if not user or not user.recovery_hash or not verify_secret(body.recovery, user.recovery_hash):
+    valid = verify_secret(body.recovery, user.recovery_hash if user and user.recovery_hash else DUMMY_PASSWORD_HASH)
+    if not user or not user.recovery_hash or not user.is_active or not valid:
+        throttle_fail(db, key)
         raise HTTPException(status_code=401, detail="Account details or recovery phrase are incorrect.")
+    throttle_clear(db, key)
     password_policy(body.password)
     user.password_hash = hash_secret(body.password)
     user.updated_at = utc_now()
@@ -737,7 +1188,8 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)) 
         if session:
             db.delete(session)
             db.commit()
-    response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=COOKIE_SECURE, samesite="lax")
+    response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=COOKIE_SECURE, samesite="strict")
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/", secure=COOKIE_SECURE, samesite="strict")
     return {"status": "signed_out"}
 
 
@@ -782,8 +1234,8 @@ def reset_account_password(
 ) -> dict[str, Any]:
     normalized = normalized_identifier(identifier)
     user = db.scalar(select(User).where((User.mobile == normalized) | (User.retail_id == normalized)))
-    if not user or user.role != "subadmin" or not user.is_active:
-        raise HTTPException(status_code=404, detail="An active Sub-Admin account was not found.")
+    if not user or user.role not in {"distributor", "retailer"} or not user.is_active:
+        raise HTTPException(status_code=404, detail="An active partner account was not found.")
     user.password_hash = None
     user.recovery_hash = None
     user.setup_token_hash = None
@@ -796,25 +1248,181 @@ def reset_account_password(
     return {"identifier": user.mobile, "code": code, "expiresInHours": 168}
 
 
-@app.post("/api/auth/operator-request")
-def operator_request(body: OperatorRequestInput, db: Session = Depends(get_db)) -> dict[str, str]:
-    authorized = any(
-        item.get("mobile") == body.mobile and item.get("status") == "active"
-        and item.get("name", "").strip().casefold() == body.name.strip().casefold()
-        for item in record_value(db, "rm-demo-sub-admin-whitelist")
-    )
-    if not authorized:
-        raise HTTPException(status_code=403, detail="Name and mobile must match an active Master Admin authorization.")
-    requests = record_value(db, "rm-demo-operator-requests")
-    if any(item.get("mobile") == body.mobile and item.get("status") == "pending" for item in requests):
-        raise HTTPException(status_code=409, detail="A setup request for this mobile is already pending.")
-    requests.insert(0, {
-        "id": "SUB-" + uuid4().hex[:12].upper(), "name": body.name.strip(),
-        "mobile": body.mobile, "requestedAt": utc_now().isoformat(), "status": "pending",
-    })
-    save_record(db, "rm-demo-operator-requests", requests)
+@app.post("/api/auth/staff-setup")
+def staff_setup(body: StaffSetupInput, request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    key = throttle_key(request, "staff-setup", body.mobile)
+    throttle_check(db, key)
+    authorization = db.scalar(select(StaffAuthorization).where(
+        StaffAuthorization.mobile == body.mobile,
+        StaffAuthorization.status == "whitelisted_pending_setup",
+    ))
+    if not authorization or authorization.name.strip().casefold() != body.name.strip().casefold():
+        throttle_fail(db, key)
+        raise HTTPException(status_code=403, detail="These details could not be verified.")
+    password_policy(body.password)
+    user = db.scalar(select(User).where(User.mobile == body.mobile))
+    if user and user.role != authorization.role:
+        raise HTTPException(status_code=409, detail="These details could not be verified.")
+    if user is None:
+        user = User(mobile=body.mobile, name=authorization.name, role=authorization.role)
+        db.add(user)
+    user.password_hash = hash_secret(body.password)
+    user.recovery_hash = hash_secret(body.recovery)
+    user.is_active = False
+    user.totp_secret, user.totp_enrolled, user.totp_last_step = None, False, 0
+    user.updated_at = utc_now()
+    authorization.status = "pending_owner_final_approval"
+    authorization.setup_submitted_at = utc_now()
+    authorization.updated_at = utc_now()
     db.commit()
-    return {"status": "submitted"}
+    throttle_clear(db, key)
+    return {"status": "pending_owner_final_approval"}
+
+
+def staff_data(item: StaffAuthorization) -> dict[str, Any]:
+    return {
+        "id": item.id, "role": item.role, "name": item.name, "mobile": item.mobile,
+        "scope": item.scope, "status": item.status,
+        "createdAt": item.created_at.isoformat(),
+        "setupSubmittedAt": item.setup_submitted_at.isoformat() if item.setup_submitted_at else "",
+        "approvedAt": item.approved_at.isoformat() if item.approved_at else "",
+    }
+
+
+@app.get("/api/owner/staff")
+def owner_list_staff(
+    _: User = Depends(role_required("master")), db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    rows = db.scalars(select(StaffAuthorization).order_by(StaffAuthorization.created_at.desc()))
+    return [staff_data(item) for item in rows]
+
+
+@app.post("/api/owner/staff")
+def owner_preauthorize_staff(
+    body: StaffAuthorizationInput,
+    owner: User = Depends(role_required("master")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if body.mobile == MASTER_ADMIN_MOBILE or db.scalar(select(User).where(User.mobile == body.mobile)):
+        raise HTTPException(status_code=409, detail="This mobile number is already assigned to an account.")
+    if db.scalar(select(StaffAuthorization).where(StaffAuthorization.mobile == body.mobile)):
+        raise HTTPException(status_code=409, detail="This mobile number is already pre-authorized.")
+    item = StaffAuthorization(
+        role=body.role, name=" ".join(body.name.split()), mobile=body.mobile,
+        scope=" ".join(body.scope.split()), status="whitelisted_pending_setup", created_by=owner.id,
+    )
+    db.add(item)
+    record_audit(db, owner, "staff_preauthorize", body.mobile[-4:], {"role": body.role})
+    db.commit()
+    return staff_data(item)
+
+
+@app.post("/api/owner/staff/{staff_id}/action")
+def owner_staff_action(
+    staff_id: str, body: StaffActionInput,
+    owner: User = Depends(role_required("master")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    item = db.get(StaffAuthorization, staff_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Staff record not found.")
+    user = db.scalar(select(User).where(User.mobile == item.mobile))
+    now = utc_now()
+    if body.action == "approve":
+        if item.status != "pending_owner_final_approval" or not user:
+            raise HTTPException(status_code=409, detail="Only submitted setup requests can be approved.")
+        item.status, item.approved_at = "ready_for_2fa", now
+        user.is_active = True
+    else:
+        if body.action == "reject" and item.status != "pending_owner_final_approval":
+            raise HTTPException(status_code=409, detail="Only submitted setup requests can be rejected.")
+        item.status = "revoked" if body.action == "revoke" else "whitelisted_pending_setup"
+        if user:
+            user.is_active = False
+            user.password_hash = user.recovery_hash = None
+            user.totp_secret, user.totp_enrolled, user.totp_last_step = None, False, 0
+            db.query(PortalSession).filter(PortalSession.user_id == user.id).delete()
+        item.approved_at = None
+        item.setup_submitted_at = None
+    item.updated_at = now
+    record_audit(db, owner, "staff_" + body.action, item.mobile[-4:], {"role": item.role})
+    db.commit()
+    return staff_data(item)
+
+
+@app.get("/api/admin/helpline")
+def admin_get_helpline(
+    _: User = Depends(role_required("master", "masteradmin")), db: Session = Depends(get_db),
+) -> dict[str, str]:
+    return {"phone": get_helpline(db)}
+
+
+@app.put("/api/admin/helpline")
+def admin_set_helpline(
+    body: HelplineInput,
+    user: User = Depends(role_required("master", "masteradmin")), db: Session = Depends(get_db),
+) -> dict[str, str]:
+    phone = " ".join(body.phone.split())
+    row = db.get(SiteSetting, HELPLINE_KEY)
+    if row is None:
+        row = SiteSetting(key=HELPLINE_KEY)
+        db.add(row)
+    row.value, row.updated_by, row.updated_at = phone, user.id, utc_now()
+    record_audit(db, user, "helpline_update", HELPLINE_KEY)
+    db.commit()
+    return {"phone": phone}
+
+
+@app.get("/api/helpline")
+def partner_helpline(
+    _: User = Depends(role_required("retailer", "distributor")), db: Session = Depends(get_db),
+) -> dict[str, str]:
+    return {"phone": get_helpline(db)}
+
+
+@app.post("/api/support/tickets")
+def create_support_ticket(
+    body: SupportTicketInput,
+    user: User = Depends(role_required("retailer", "distributor")), db: Session = Depends(get_db),
+) -> dict[str, str]:
+    tickets = record_value(db, SUPPORT_TICKETS_KEY)
+    if sum(1 for item in tickets if item.get("userId") == user.id and item.get("status") == "open") >= 10:
+        raise HTTPException(status_code=429, detail="Please wait for your open tickets to be answered.")
+    ticket = {
+        "id": "TKT-" + uuid4().hex[:10].upper(), "userId": user.id, "name": user.name,
+        "mobile": user.mobile, "role": user.role, "category": body.category,
+        "subject": body.subject.strip(), "message": body.message.strip(),
+        "status": "open", "createdAt": utc_now().isoformat(),
+    }
+    save_record(db, SUPPORT_TICKETS_KEY, [ticket, *tickets][:1000])
+    db.commit()
+    return {"id": ticket["id"], "status": "open"}
+
+
+@app.get("/api/support/tickets")
+def list_support_tickets(
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    tickets = record_value(db, SUPPORT_TICKETS_KEY)
+    if user.role in STAFF_ROLES:
+        return tickets
+    if user.role in {"retailer", "distributor"}:
+        return [item for item in tickets if item.get("userId") == user.id]
+    raise HTTPException(status_code=403, detail="You do not have permission for this operation.")
+
+
+@app.post("/api/support/tickets/{ticket_id}/close")
+def close_support_ticket(
+    ticket_id: str,
+    user: User = Depends(role_required("master", "masteradmin", "subadmin")),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    tickets = record_value(db, SUPPORT_TICKETS_KEY)
+    ticket = next((item for item in tickets if item.get("id") == ticket_id), None)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    ticket["status"], ticket["closedAt"] = "closed", utc_now().isoformat()
+    save_record(db, SUPPORT_TICKETS_KEY, tickets)
+    db.commit()
+    return {"status": "closed"}
 
 
 def sync_retail_profiles(db: Session, profiles: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -825,7 +1433,12 @@ def sync_retail_profiles(db: Session, profiles: list[dict[str, Any]]) -> list[di
         mobile = str(profile.get("mobile", "")).strip()
         name = str(profile.get("name", "")).strip()
         email = str(profile.get("email", "")).strip().lower()
-        if not user_id or not mobile.isdigit() or len(mobile) != 10 or len(name) < 2:
+        if (
+            not re.fullmatch(r"[A-Za-z]{2,5}[0-9]{4,}", user_id)
+            or not mobile.isdigit() or len(mobile) != 10
+            or not 2 <= len(name) <= 80
+            or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)
+        ):
             raise HTTPException(status_code=422, detail="Retailer profile contains invalid identity fields.")
         user = db.scalar(select(User).where(User.mobile == mobile))
         if user and user.role != "retailer":
@@ -843,54 +1456,6 @@ def sync_retail_profiles(db: Session, profiles: list[dict[str, Any]]) -> list[di
             setup_codes.append({"identifier": user_id, "mobile": mobile, "code": setup_code})
         sanitized.append({k: v for k, v in profile.items() if k not in {"passwordHash", "password"}})
     save_record(db, "rm-demo-retail-profiles", sanitized)
-    return setup_codes
-
-
-def sync_operators(db: Session) -> list[dict[str, str]]:
-    whitelist = record_value(db, "rm-demo-sub-admin-whitelist")
-    operators = record_value(db, "rm-demo-sub-admins")
-    setup_codes = []
-    for account in db.scalars(select(User).where(User.role == "subadmin")):
-        identity = next((item for item in whitelist if item.get("mobile") == account.mobile), None)
-        operator = next((item for item in operators if item.get("mobile") == account.mobile), None)
-        identity_active = bool(
-            identity and identity.get("status") == "active"
-            and identity.get("name", "").strip().casefold() == account.name.strip().casefold()
-        )
-        operator_active = bool(
-            operator and operator.get("status") == "active"
-            and operator.get("name", "").strip().casefold() == account.name.strip().casefold()
-        )
-        account.is_active = identity_active and operator_active
-        if identity_active and operator is None:
-            account.password_hash = None
-            account.recovery_hash = None
-            db.query(PortalSession).filter(PortalSession.user_id == account.id).delete()
-        elif not identity_active and (not identity or identity.get("status") in {"banned", "revoked"}):
-            account.password_hash = None
-            account.recovery_hash = None
-            db.query(PortalSession).filter(PortalSession.user_id == account.id).delete()
-    for operator in operators:
-        mobile = str(operator.get("mobile", ""))
-        active_identity = any(
-            auth.get("mobile") == mobile and auth.get("status") == "active"
-            and auth.get("name", "").strip().casefold() == str(operator.get("name", "")).strip().casefold()
-            for auth in whitelist
-        )
-        if operator.get("status") == "active" and active_identity:
-            account = db.scalar(select(User).where(User.mobile == mobile))
-            if account is None:
-                account = User(mobile=mobile, name=str(operator.get("name", "")), role="subadmin")
-                db.add(account)
-            else:
-                if account.role != "subadmin":
-                    raise HTTPException(status_code=409, detail="That mobile number is already assigned to another account.")
-                account.is_active = True
-                account.name = str(operator.get("name", ""))
-            setup_code = issue_setup_token(account)
-            if setup_code:
-                setup_codes.append({"identifier": mobile, "mobile": mobile, "code": setup_code})
-    db.flush()
     return setup_codes
 
 
@@ -914,7 +1479,8 @@ def save_applications(db: Session, proposed: list[dict[str, Any]], actor: User) 
         "operationalPin", "servicePincodes", "documents", "submittedAt",
         "assignedDistributorApplicationId", "assignedDistributorId",
         "assignedDistributorMobile", "assignedMasterAdmin", "routedAt", "accountUserId",
-        "revision", "revisionHistory",
+        "revision", "revisionHistory", "idType", "idLast4", "jurisdiction",
+        "referralVerified", "privacyAcceptedAt", "mobileVerification",
     }
     mutable = {
         "status", "generatedId", "rejectionReason", "rejectedAt", "rejectedBy",
@@ -935,7 +1501,7 @@ def save_applications(db: Session, proposed: list[dict[str, Any]], actor: User) 
             or old.get("assignedDistributorApplicationId") != own_distributor.get("id")
         ):
             raise HTTPException(status_code=403, detail="This application is not assigned to your Distributor account.")
-        if actor.role == "subadmin" and old.get("assignedDistributorApplicationId"):
+        if actor.role in TWO_FACTOR_ROLES and old.get("assignedDistributorApplicationId"):
             raise HTTPException(status_code=403, detail="This application is not in your review queue.")
         protected_fields = fixed - {"documents", "revisionHistory"}
         if actor.role == "master":
@@ -947,9 +1513,9 @@ def save_applications(db: Session, proposed: list[dict[str, Any]], actor: User) 
             for field in protected_fields
         ):
             raise HTTPException(status_code=403, detail="Application identity and routing are server controlled.")
-        if "documents" in new and new["documents"] != old.get("documents", []):
+        if "documents" in new and [d.get("id") for d in new["documents"]] != [d.get("id") for d in old.get("documents", [])]:
             raise HTTPException(status_code=403, detail="Application documents are managed by the secure upload service.")
-        if "revisionHistory" in new and new["revisionHistory"] != old.get("revisionHistory", []):
+        if "revisionHistory" in new and len(new["revisionHistory"]) != len(old.get("revisionHistory", [])):
             raise HTTPException(status_code=403, detail="Application revision history is managed by the server.")
         if actor.role == "master" and "servicePincodes" in new:
             pins = new["servicePincodes"]
@@ -959,8 +1525,12 @@ def save_applications(db: Session, proposed: list[dict[str, Any]], actor: User) 
                 raise HTTPException(status_code=422, detail="Distributor service PINs must be unique.")
         if any(field not in fixed | mutable for field in new):
             raise HTTPException(status_code=422, detail="Unsupported application fields.")
-        if new.get("status") not in {"pending", "approved", "rejected", "correction_required", "blocked"}:
+        if new.get("status") not in {"pending", "approved", "rejected", "correction_required", "blocked", "suspended"}:
             raise HTTPException(status_code=422, detail="Invalid application status.")
+        if new.get("status") == "suspended" and old.get("status") != "suspended":
+            raise HTTPException(status_code=403, detail="Use the partner suspension action to suspend an account.")
+        if old.get("status") == "suspended" and new.get("status") != "suspended":
+            raise HTTPException(status_code=403, detail="Use the partner reactivation action for suspended accounts.")
         if old.get("status") == "approved" and new.get("status") != "approved" and actor.role != "master":
             raise HTTPException(status_code=403, detail="Only the Master Admin can change an approved application.")
         if actor.role != "master":
@@ -975,10 +1545,14 @@ def save_applications(db: Session, proposed: list[dict[str, Any]], actor: User) 
                 raise HTTPException(status_code=422, detail="An official partner ID is required for approval.")
             if old.get("role") == "distributor":
                 ensure_unique_distributor_pins(db, old)
+        previous_status = old.get("status")
         old.update({field: new[field] for field in mutable if field in new})
         row = db.get(Application, app_id)
         row.payload = old
         row.status = str(old.get("status", "pending"))
+        if row.status in KYC_PURGE_STATUSES and row.status != previous_status:
+            purge_application_documents(db, app_id)
+            old = dict(row.payload)
         if row.status == "approved":
             setup_codes.extend(sync_approved_account(db, old))
     validate_all_distributor_pins(db)
@@ -1075,7 +1649,7 @@ def sync_approved_account(db: Session, data: dict[str, Any]) -> list[dict[str, s
 
 @app.get("/api/portal/state")
 def portal_state(user: User = Depends(current_user), db: Session = Depends(get_db)) -> dict[str, Any]:
-    if user.role not in {"master", "subadmin", "distributor"}:
+    if user.role not in STAFF_ROLES | {"distributor"}:
         raise HTTPException(status_code=403, detail="The operations workspace is for staff accounts.")
     state = {}
     for key in STATE_KEYS:
@@ -1090,7 +1664,7 @@ def portal_state(user: User = Depends(current_user), db: Session = Depends(get_d
             records = [x for x in records if x.get("distributorMobile") == user.mobile]
         state[key] = records
     apps = application_values(db)
-    if user.role == "subadmin":
+    if user.role in TWO_FACTOR_ROLES:
         apps = [x for x in apps if not x.get("assignedDistributorApplicationId")]
     elif user.role == "distributor":
         profile = next((x for x in apps if x.get("mobile") == user.mobile and x.get("role") == "distributor"), None)
@@ -1209,6 +1783,8 @@ def download_customer_document(
     document = db.get(CustomerDocument, document_id)
     if not document or document.application_id != application_id:
         raise HTTPException(status_code=404, detail="The requested customer document was not found.")
+    if document.purged_at:
+        raise HTTPException(status_code=410, detail="This document was deleted under the 7-day KYC retention policy.")
     storage_dir = document_storage_dir()
     path = (storage_dir / document.storage_key).resolve()
     if path.parent != storage_dir or not path.is_file():
@@ -1274,6 +1850,15 @@ def update_state(
         raise HTTPException(status_code=404, detail="Unknown portal collection.")
     if key in MASTER_ONLY_KEYS and user.role != "master":
         raise HTTPException(status_code=403, detail="Only the Master Admin can update this collection.")
+    staff_roles = STAFF_ROLES | {"distributor"}
+    if key in {
+        "rm-demo-applications", "rm-demo-blocked-partner-mobiles",
+    } and user.role not in staff_roles:
+        raise HTTPException(status_code=403, detail="Staff access is required to update this collection.")
+    if key == "rm-demo-distributor-notifications" and user.role not in {"master", "distributor"}:
+        raise HTTPException(status_code=403, detail="Only the Master Admin or assigned Distributor can update notifications.")
+    if key == "rm-demo-approvals" and user.role not in TWO_FACTOR_ROLES | {"master"}:
+        raise HTTPException(status_code=403, detail="Only Sub-Admins may request Master Admin approval.")
     setup_codes: list[dict[str, str]] = []
     if key == "rm-demo-applications":
         setup_codes = save_applications(db, body.value, user)
@@ -1292,13 +1877,42 @@ def update_state(
         ):
             raise HTTPException(status_code=403, detail="Sub-Admins may only submit their own approval requests.")
         save_record(db, key, body.value)
+    elif key == "rm-demo-distributor-notifications" and user.role == "distributor":
+        existing = record_value(db, key)
+        own_existing = {
+            item.get("id"): item for item in existing
+            if item.get("distributorMobile") == user.mobile
+        }
+        if any(not isinstance(item.get("id"), str) for item in body.value):
+            raise HTTPException(status_code=403, detail="Distributors may update only notification status in their own queue.")
+        proposed = {item["id"]: item for item in body.value}
+        if len(proposed) != len(body.value) or set(proposed) != set(own_existing):
+            raise HTTPException(status_code=403, detail="Distributors may update only notification status in their own queue.")
+        for notification_id, item in proposed.items():
+            old = own_existing[notification_id]
+            if (
+                item.get("distributorMobile") != user.mobile
+                or item.get("status") not in {"queued", "approved", "rejected"}
+                or any(
+                    field not in {"status", "updatedAt"}
+                    and item.get(field) != old.get(field)
+                    for field in set(item) | set(old)
+                )
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Distributors may update only notification status in their own queue.",
+                )
+        save_record(
+            db, key,
+            [item for item in existing if item.get("distributorMobile") != user.mobile]
+            + body.value,
+        )
     else:
         save_record(db, key, body.value)
         if key == "rm-demo-distributor-pin-mappings":
             validate_pin_mappings(db, body.value)
             validate_all_distributor_pins(db)
-        if key in {"rm-demo-sub-admins", "rm-demo-sub-admin-whitelist"}:
-            setup_codes = sync_operators(db)
     db.commit()
     return {"status": "saved", "setupCodes": setup_codes if user.role == "master" else []}
 
@@ -1338,6 +1952,7 @@ def pin_route(pin: str, db: Session = Depends(get_db)) -> dict[str, Any]:
 
 @app.post("/api/applications")
 async def submit_application(
+    request: Request,
     application: str = Form(...),
     document_fields: str = Form(...),
     files: list[UploadFile] = File(...),
@@ -1348,11 +1963,40 @@ async def submit_application(
         submitted_fields = json.loads(document_fields)
     except (ValidationError, ValueError, TypeError) as error:
         raise HTTPException(status_code=422, detail="Application details or document fields are invalid.") from error
-    expected_fields = (
-        ["retailerIdentity", "retailerAddressProof", "retailerBusinessProof"]
-        if body.role == "retailer"
-        else list(DOCUMENT_FIELDS)
-    )
+    if body.website:
+        raise HTTPException(status_code=400, detail="The application could not be accepted.")
+    now = utc_now()
+    client = request.client.host if request.client else "unknown"
+    recent = [hit for hit in _application_hits.get(client, []) if now - hit < APPLICATION_RATE_WINDOW]
+    if len(_application_hits) > 5000:
+        for stale in [k for k, v in _application_hits.items() if not v or now - v[-1] >= APPLICATION_RATE_WINDOW]:
+            del _application_hits[stale]
+    if len(recent) >= APPLICATION_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many applications from this connection. Try again later.")
+    _application_hits[client] = recent + [now]
+    if not body.privacyAccepted:
+        raise HTTPException(status_code=422, detail="Accept the data-privacy notice to apply.")
+    if body.role == "retailer":
+        if not body.idType or len(body.idLast4) != 4:
+            raise HTTPException(status_code=422, detail="Select Aadhaar or PAN and enter only its last 4 characters.")
+        if not body.mobileConfirmed:
+            raise HTTPException(status_code=422, detail="Confirm that you own and can receive calls on this mobile number.")
+    else:
+        if len(body.jurisdiction.strip()) < 3 or not body.servicePincodes:
+            raise HTTPException(status_code=422, detail="Distributor applications require a jurisdiction and at least one service PIN code.")
+        if not body.idType or len(body.idLast4) != 4:
+            raise HTTPException(status_code=422, detail="Select Aadhaar or PAN and enter only its last 4 characters.")
+        if not body.mobileConfirmed:
+            raise HTTPException(status_code=422, detail="Confirm that you own and can receive calls on this mobile number.")
+        referral_codes = [
+            code.strip() for code in os.getenv("DISTRIBUTOR_REFERRAL_CODES", "").split(",") if code.strip()
+        ]
+        if not referral_codes:
+            raise HTTPException(status_code=503, detail="Distributor onboarding is closed: no Master Distributor referral codes are configured.")
+        supplied_code = body.referralCode.strip().casefold()
+        if not supplied_code or not any(compare_digest(supplied_code, code.casefold()) for code in referral_codes):
+            raise HTTPException(status_code=403, detail="The Master Distributor referral / approval code is not valid.")
+    expected_fields = list(RETAILER_DOCUMENTS if body.role == "retailer" else DISTRIBUTOR_DOCUMENTS)
     if (
         not isinstance(submitted_fields, list)
         or any(not isinstance(field_name, str) for field_name in submitted_fields)
@@ -1362,12 +2006,19 @@ async def submit_application(
     ):
         raise HTTPException(status_code=422, detail="Upload every required application document exactly once.")
 
-    data = body.model_dump(exclude={"correctionReference"})
+    data = body.model_dump(exclude={
+        "correctionReference", "website", "referralCode", "mobileConfirmed", "privacyAccepted",
+    })
     data.update({
         "name": body.name.strip(), "mobile": body.mobile,
         "business": body.business.strip(), "email": body.email.strip().lower(),
         "address": body.address.strip(), "city": body.city.strip(),
-        "submittedAt": utc_now().isoformat(),
+        "jurisdiction": body.jurisdiction.strip(),
+        "idLast4": body.idLast4.upper(),
+        "referralVerified": body.role == "distributor",
+        "mobileVerification": "pending_callback",
+        "privacyAcceptedAt": now.isoformat(),
+        "submittedAt": now.isoformat(),
     })
     if body.role == "retailer" and not body.operationalPin:
         raise HTTPException(status_code=422, detail="Retailer application requires a six-digit PIN.")
@@ -1381,6 +2032,8 @@ async def submit_application(
         if not row or row.mobile != body.mobile or row.status not in {"rejected", "correction_required"}:
             raise HTTPException(status_code=409, detail="This application is no longer eligible for correction.")
         previous = dict(row.payload)
+        if row.role != body.role or previous.get("role") != body.role:
+            raise HTTPException(status_code=409, detail="The partner type cannot be changed while correcting an application.")
         data.update({
             "id": correction_id, "status": "pending",
             "revision": int(previous.get("revision", 1)) + 1,
@@ -1489,11 +2142,19 @@ async def submit_application(
 
 
 @app.get("/api/applications/lookup")
-def lookup_application(reference: str, mobile: str, db: Session = Depends(get_db)) -> dict[str, Any]:
-    row = db.get(Application, reference.strip())
+def lookup_application(
+    reference: str, mobile: str, request: Request, db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    key = throttle_key(request, "lookup", "global")
+    throttle_check(db, key)
+    row = db.get(Application, reference.strip()[:80])
     if not row or not compare_digest(row.mobile, mobile.strip()):
+        throttle_fail(db, key)
         raise HTTPException(status_code=404, detail="No application matched that reference and mobile number.")
-    return {"application": row.payload}
+    payload = dict(row.payload)
+    payload.pop("documents", None)
+    payload.pop("revisionHistory", None)
+    return {"application": payload}
 
 
 @app.get("/api/public/application-status")
@@ -1510,16 +2171,26 @@ def application_status(mobile: str, db: Session = Depends(get_db)) -> dict[str, 
 
 
 @app.post("/api/retailer/activate")
-def activate_retailer(body: AuthInput, response: Response, db: Session = Depends(get_db)) -> dict[str, Any]:
+def activate_retailer(
+    body: AuthInput, request: Request, response: Response, db: Session = Depends(get_db),
+) -> dict[str, Any]:
     if not body.name.isdigit() or len(body.name) != 10:
         raise HTTPException(status_code=422, detail="Confirm the registered 10-digit mobile number.")
+    activate_key = throttle_key(request, "activate", normalized_identifier(body.identifier))
+    throttle_check(db, activate_key)
     user = db.scalar(select(User).where(User.retail_id == normalized_identifier(body.identifier)))
-    if not user or user.mobile != body.name or user.role != "retailer" or user.password_hash:
+    if not user or user.mobile != body.name or user.role != "retailer" or user.password_hash or not user.is_active:
+        throttle_fail(db, activate_key)
         raise HTTPException(status_code=403, detail="Retail ID or registered mobile number could not be verified.")
     password_policy(body.password)
     if len(body.recovery) < 12:
         raise HTTPException(status_code=422, detail="Recovery phrase must be at least 12 characters.")
-    consume_setup_token(user, body.activationToken)
+    try:
+        consume_setup_token(user, body.activationToken)
+    except HTTPException:
+        throttle_fail(db, activate_key)
+        raise
+    throttle_clear(db, activate_key)
     user.password_hash = hash_secret(body.password)
     user.recovery_hash = hash_secret(body.recovery)
     user.updated_at = utc_now()
@@ -1528,14 +2199,231 @@ def activate_retailer(body: AuthInput, response: Response, db: Session = Depends
     return {"user": session_user_data(user)}
 
 
+def distributor_card(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "applicationId": payload.get("id", ""),
+        "name": payload.get("name", ""),
+        "mobile": payload.get("mobile", ""),
+        "email": payload.get("email", ""),
+        "distributorId": payload.get("generatedId", ""),
+        "status": payload.get("status", ""),
+        "area": {
+            "jurisdiction": payload.get("jurisdiction", ""),
+            "city": payload.get("city", ""),
+            "pincodes": payload.get("servicePincodes", []),
+        },
+    }
+
+
+def approved_distributor_application(db: Session, user: User) -> Application | None:
+    return db.scalar(select(Application).where(
+        Application.mobile == user.mobile, Application.role == "distributor",
+        Application.status == "approved",
+    ))
+
+
 @app.get("/api/retailer/profile")
 def retailer_profile(
     user: User = Depends(role_required("retailer")), db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    contact = record_value(db, "rm-demo-master-contact")
-    return {"profile": session_user_data(user), "upline": contact[0] if contact else {
-        "name": "RAHAMTULLA MONDAL", "mobile": MASTER_ADMIN_MOBILE, "email": "",
-    }}
+    own = db.scalar(select(Application).where(
+        Application.mobile == user.mobile, Application.role == "retailer",
+    ).order_by(Application.submitted_at.desc()))
+    distributor = None
+    if own and own.distributor_application_id:
+        row = db.get(Application, own.distributor_application_id)
+        if row:
+            distributor = distributor_card(row.payload)
+    return {"profile": session_user_data(user), "distributor": distributor, "helpline": get_helpline(db)}
+
+
+@app.get("/api/distributor/retailers")
+def distributor_retailers(
+    user: User = Depends(role_required("distributor")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    distributor = approved_distributor_application(db, user)
+    if not distributor:
+        raise HTTPException(status_code=403, detail="An approved Distributor profile is required.")
+    rows = list(db.scalars(select(Application).where(
+        Application.role == "retailer", Application.distributor_application_id == distributor.id,
+    ).order_by(Application.submitted_at.desc())))
+    accounts = {
+        account.mobile: account for account in db.scalars(
+            select(User).where(User.role == "retailer", User.mobile.in_([row.mobile for row in rows] or [""]))
+        )
+    }
+    totals = {
+        user_id: (count, total) for user_id, count, total in db.execute(
+            select(TransactionRecord.user_id, func.count(), func.coalesce(func.sum(TransactionRecord.amount_paise), 0))
+            .where(TransactionRecord.user_id.in_([a.id for a in accounts.values()] or [""]))
+            .group_by(TransactionRecord.user_id)
+        )
+    }
+    retailers = []
+    for row in rows:
+        account = accounts.get(row.mobile)
+        count, total = totals.get(account.id, (0, 0)) if account else (0, 0)
+        retailers.append({
+            "applicationId": row.id, "name": row.payload.get("name", ""),
+            "business": row.payload.get("business", ""), "mobile": row.mobile,
+            "city": row.payload.get("city", ""), "pin": row.payload.get("operationalPin", ""),
+            "status": row.status, "retailerId": row.payload.get("generatedId", ""),
+            "active": bool(row.status == "approved" and account and account.is_active),
+            "submittedAt": row.submitted_at.isoformat(),
+            "transactionCount": count, "transactionTotalPaise": int(total),
+        })
+    return {
+        "distributor": distributor_card(distributor.payload),
+        "summary": {
+            "total": len(retailers),
+            "active": sum(1 for item in retailers if item["active"]),
+            "pending": sum(1 for item in retailers if item["status"] == "pending"),
+            "suspended": sum(1 for item in retailers if item["status"] == "suspended"),
+            "transactions": sum(item["transactionCount"] for item in retailers),
+        },
+        "retailers": retailers,
+    }
+
+
+def partner_summary(row: Application) -> dict[str, Any]:
+    payload = row.payload
+    return {
+        "applicationId": row.id, "role": row.role, "name": payload.get("name", ""),
+        "business": payload.get("business", ""), "mobile": row.mobile,
+        "city": payload.get("city", ""), "status": row.status,
+        "partnerId": payload.get("generatedId", ""),
+        "pin": payload.get("operationalPin", ""),
+        "jurisdiction": payload.get("jurisdiction", ""),
+        "pincodes": payload.get("servicePincodes", []),
+        "distributorApplicationId": row.distributor_application_id,
+        "submittedAt": row.submitted_at.isoformat(),
+    }
+
+
+@app.get("/api/admin/network")
+def admin_network(
+    _: User = Depends(role_required("master", "masteradmin", "subadmin")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    rows = list(db.scalars(select(Application).order_by(Application.submitted_at.desc())))
+    partners = [partner_summary(row) for row in rows]
+    distributors = [item for item in partners if item["role"] == "distributor"]
+    for item in distributors:
+        mine = [r for r in partners if r["role"] == "retailer" and r["distributorApplicationId"] == item["applicationId"]]
+        item["retailerCount"] = len(mine)
+        item["activeRetailerCount"] = sum(1 for r in mine if r["status"] == "approved")
+    names = {item["applicationId"]: item["name"] for item in distributors}
+    retailers = [item for item in partners if item["role"] == "retailer"]
+    for item in retailers:
+        item["distributorName"] = names.get(item["distributorApplicationId"], "")
+    return {"distributors": distributors, "retailers": retailers}
+
+
+def next_partner_id(db: Session, role: str) -> str:
+    prefix = "RTF" if role == "retailer" else "DST"
+    used = {value for value in db.scalars(select(User.retail_id)) if value}
+    used.update(str(row.payload.get("generatedId", "")).upper() for row in db.scalars(select(Application)))
+    while True:
+        candidate = prefix + str(secrets.randbelow(900000) + 100000)
+        if candidate not in used:
+            return candidate
+
+
+@app.post("/api/admin/partners/{application_id}/action")
+def partner_action(
+    application_id: str, body: PartnerActionInput,
+    user: User = Depends(role_required("master", "masteradmin", "subadmin", "distributor")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(Application, application_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Partner application not found.")
+    if user.role == "distributor":
+        own = approved_distributor_application(db, user)
+        if (
+            not own or row.role != "retailer" or row.distributor_application_id != own.id
+            or body.action not in {"approve", "reject"}
+        ):
+            raise HTTPException(status_code=403, detail="This partner is not in your Distributor scope.")
+    payload = dict(row.payload)
+    setup_codes: list[dict[str, str]] = []
+    if body.action in {"approve", "reject"}:
+        if row.status not in {"pending", "correction_required"} or (
+            body.action == "approve" and row.status != "pending"
+        ):
+            raise HTTPException(status_code=409, detail="Only pending applications can be reviewed.")
+        if user.role in TWO_FACTOR_ROLES and row.distributor_application_id:
+            raise HTTPException(status_code=403, detail="This application is in a Distributor's queue.")
+    if body.action == "approve":
+        if row.role == "distributor":
+            ensure_unique_distributor_pins(db, payload)
+        payload.update({
+            "status": "approved", "approvedBy": user.name, "approvedAt": utc_now().isoformat(),
+            "generatedId": str(payload.get("generatedId") or next_partner_id(db, row.role)),
+        })
+        row.payload, row.status = payload, "approved"
+        setup_codes = sync_approved_account(db, payload)
+        validate_all_distributor_pins(db)
+    elif body.action == "reject":
+        payload.update({
+            "status": "rejected", "rejectedBy": user.name, "rejectedAt": utc_now().isoformat(),
+            "rejectionReason": body.reason.strip(),
+        })
+        row.payload, row.status = payload, "rejected"
+    elif body.action == "suspend":
+        if row.status != "approved":
+            raise HTTPException(status_code=409, detail="Only approved partners can be suspended.")
+        payload["status"] = "suspended"
+        row.payload, row.status = payload, "suspended"
+        account = db.get(User, payload.get("accountUserId", ""))
+        if account:
+            account.is_active = False
+            db.query(PortalSession).filter(PortalSession.user_id == account.id).delete()
+    else:
+        if row.status != "suspended":
+            raise HTTPException(status_code=409, detail="Only suspended partners can be reactivated.")
+        payload["status"] = "approved"
+        row.payload, row.status = payload, "approved"
+        account = db.get(User, payload.get("accountUserId", ""))
+        if account:
+            account.is_active = True
+    if row.status in KYC_PURGE_STATUSES:
+        purge_application_documents(db, row.id)
+    record_audit(db, user, "partner_" + body.action, row.id, {"reason": body.reason.strip(), "role": row.role})
+    db.commit()
+    return {
+        "status": row.status, "partnerId": row.payload.get("generatedId", ""),
+        "setupCodes": setup_codes if user.role in STAFF_ROLES else [],
+    }
+
+
+@app.post("/api/admin/retailers/{application_id}/reassign")
+def reassign_retailer(
+    application_id: str, body: ReassignInput,
+    user: User = Depends(role_required("master", "masteradmin", "subadmin")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(Application, application_id)
+    if not row or row.role != "retailer":
+        raise HTTPException(status_code=404, detail="Retailer application not found.")
+    payload = dict(row.payload)
+    target_id = body.distributorApplicationId.strip()
+    if target_id:
+        target = db.get(Application, target_id)
+        if not target or target.role != "distributor" or target.status != "approved":
+            raise HTTPException(status_code=422, detail="Choose an approved Distributor.")
+        payload.update({
+            "assignedDistributorApplicationId": target.id,
+            "assignedDistributorId": target.payload.get("generatedId", ""),
+            "assignedDistributorMobile": target.mobile, "assignedMasterAdmin": False,
+        })
+    else:
+        for field in ("assignedDistributorApplicationId", "assignedDistributorId", "assignedDistributorMobile"):
+            payload[field] = ""
+        payload["assignedMasterAdmin"] = True
+    payload["routedAt"] = utc_now().isoformat()
+    row.payload, row.distributor_application_id = payload, target_id
+    record_audit(db, user, "retailer_reassign", row.id, {"to": target_id or "master"})
+    db.commit()
+    return {"status": "reassigned", "distributorApplicationId": target_id}
 
 
 @app.post("/api/retailer/upline-request")
@@ -1564,7 +2452,7 @@ def request_upline_change(
 @app.post("/api/transactions")
 async def create_transaction(
     request: Request,
-    user: User = Depends(role_required("master", "subadmin", "retailer", "distributor")),
+    user: User = Depends(role_required("master", "masteradmin", "subadmin", "retailer", "distributor")),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     uploads: list[StarletteUploadFile] = []
@@ -1734,6 +2622,31 @@ async def scan_document(file: UploadFile = File(...)) -> dict[str, str]:
         "extracted_text": " ".join(result[1] for result in results),
         "message": "Image text extraction completed. Document authenticity was not verified.",
     }
+
+
+@app.get("/preview-dashboard", include_in_schema=False)
+def preview_dashboard() -> FileResponse:
+    return FileResponse(BASE_DIR / "dashboard.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard_page() -> FileResponse:
+    return FileResponse(BASE_DIR / "dashboard.html", headers={"Cache-Control": "no-store"})
+
+
+class AssistantChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message: str = Field(max_length=2000)
+
+
+@app.post("/assistant/chat")
+def assistant_chat(payload: AssistantChatRequest, request: Request, user: User = Depends(current_user)):
+    check_origin(request)
+    session_cookie = request.cookies.get(COOKIE_NAME, "")
+    if not compare_digest(request.headers.get("x-csrf-token", ""), csrf_token_for(session_cookie)):
+        raise HTTPException(status_code=403, detail="A valid CSRF token is required.")
+    body, status = handle_chat(payload.message, user.id, ASSISTANT_LIMITER, str(user.id))
+    return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/{file_path:path}", include_in_schema=False)

@@ -1,17 +1,12 @@
 "use strict";
 
-let MASTER_ADMIN_MOBILE = "8509010483";
 const APPLICATIONS_KEY = "rm-demo-applications";
 const BLOCKED_PARTNER_MOBILES_KEY = "rm-demo-blocked-partner-mobiles";
 const DISTRIBUTOR_PIN_MAPPINGS_KEY = "rm-demo-distributor-pin-mappings";
 const DISTRIBUTOR_NOTIFICATIONS_KEY = "rm-demo-distributor-notifications";
-const OPERATORS_KEY = "rm-demo-sub-admins";
-const OPERATOR_REQUESTS_KEY = "rm-demo-operator-requests";
-const OPERATOR_WHITELIST_KEY = "rm-demo-sub-admin-whitelist";
 const MASTER_APPROVALS_KEY = "rm-demo-approvals";
 const PENDING_WELCOME_KEY = "rm-demo-pending-welcome";
 const RETAIL_PROFILES_KEY = "rm-demo-retail-profiles";
-const MASTER_CONTACT_KEY = "rm-demo-master-contact";
 const UPLINE_REQUESTS_KEY = "rm-demo-upline-requests";
 const SERVICE_REQUESTS_KEY = "rm-demo-service-requests";
 const DOCUMENT_SCAN_API_URL = "/api/scan-document";
@@ -23,6 +18,15 @@ const PORTAL_WRITE_QUEUES = new Map();
 
 async function apiRequest(path, options) {
     const requestOptions = Object.assign({ credentials: "same-origin" }, options || {});
+    const method = String(requestOptions.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+        const csrf = document.cookie.split("; ").find(function (item) { return item.startsWith("rm_csrf="); });
+        if (csrf) {
+            requestOptions.headers = Object.assign({}, requestOptions.headers, {
+                "X-CSRF-Token": decodeURIComponent(csrf.slice("rm_csrf=".length)),
+            });
+        }
+    }
     if (requestOptions.body && typeof requestOptions.body !== "string" &&
         !(requestOptions.body instanceof FormData)) {
         requestOptions.headers = Object.assign({}, requestOptions.headers, { "Content-Type": "application/json" });
@@ -75,12 +79,6 @@ async function hydratePortalData() {
 
 document.addEventListener("DOMContentLoaded", async function () {
     try {
-        const config = await apiRequest("/api/public/config");
-        MASTER_ADMIN_MOBILE = config.masterAdminMobile;
-    } catch (error) {
-        reportApiFailure(error);
-    }
-    try {
         await hydratePortalData();
     } catch (error) {
         reportApiFailure(error);
@@ -127,6 +125,16 @@ function initializeServerApplicationForm() {
         roleInput.value = role;
         document.getElementById("distributor-pin-field").hidden = !isDistributor;
         distributorPins.disabled = !isDistributor;
+        distributorPins.required = isDistributor;
+        ["distributor-jurisdiction", "distributor-referral"].forEach(function (id) {
+            const input = document.getElementById(id);
+            input.disabled = !isDistributor;
+            input.required = isDistributor;
+        });
+        const retailerKyc = document.getElementById("retailer-kyc-doc");
+        retailerKyc.disabled = isDistributor;
+        retailerKyc.required = !isDistributor;
+        document.getElementById("retailer-kyc-field").hidden = isDistributor;
         operationalPin.disabled = isDistributor;
         document.getElementById("operational-pin-field").hidden = isDistributor;
         distributorDocuments.hidden = !isDistributor;
@@ -321,6 +329,13 @@ function initializeServerApplicationForm() {
             operationalPin: roleInput.value === "retailer" ? operationalPin.value.trim() : "",
             servicePincodes: pins,
             correctionReference: editingApplicationId,
+            idType: String(formData.get("idType") || ""),
+            idLast4: String(formData.get("idLast4") || "").trim(),
+            jurisdiction: roleInput.value === "distributor" ? String(formData.get("jurisdiction") || "").trim() : "",
+            referralCode: roleInput.value === "distributor" ? String(formData.get("referralCode") || "").trim() : "",
+            mobileConfirmed: formData.get("mobileConfirmed") === "on",
+            privacyAccepted: formData.get("privacyAccepted") === "on",
+            website: String(formData.get("website") || ""),
         };
         const documentInputs = Array.from(form.querySelectorAll('input[type="file"]:not(:disabled)'));
         const requestBody = new FormData();
@@ -448,7 +463,7 @@ function initializeDocumentScanner() {
             } catch (error) {
                 scanStatus.textContent = error.name === "AbortError"
                     ? "The scan timed out. Try again when the local OCR service is available."
-                    : error.message || "Could not connect to the local OCR service on port 8001.";
+                    : error.message || "Could not connect to the local OCR service. Check that the portal is running and try again.";
             } finally {
                 window.clearTimeout(timeoutId);
                 scanButton.disabled = !input.files || input.files.length !== 1 ||
@@ -533,10 +548,13 @@ function initializePortalLogin() {
     const passwordForm = document.getElementById("login-password-form");
     const setupForm = document.getElementById("first-time-setup-form");
     const recoveryForm = document.getElementById("password-recovery-form");
-    const operatorSetupForm = document.getElementById("operator-setup-form");
+    const staffSetupForm = document.getElementById("staff-setup-form");
+    const twoFactorForm = document.getElementById("two-factor-form");
     const retailerActivationForm = document.getElementById("retailer-activation-form");
     const status = document.getElementById("login-status");
     let selectedAccount = null;
+    let preAuth = "";
+    let twoFactorMode = "";
 
     function setStatus(message) {
         status.textContent = message;
@@ -544,12 +562,27 @@ function initializePortalLogin() {
     }
 
     function showOnly(target) {
-        [mobileForm, passwordForm, setupForm, recoveryForm, operatorSetupForm, retailerActivationForm]
+        [mobileForm, passwordForm, setupForm, recoveryForm, staffSetupForm, twoFactorForm, retailerActivationForm]
             .forEach(function (form) { form.hidden = form !== target; });
+        const welcome = document.getElementById("login-welcome");
+        if (welcome) { welcome.hidden = true; }
         status.hidden = true;
     }
 
     function redirectForUser(user) {
+        // The name is shown only here, after the password (and 2FA, if required) was verified.
+        [mobileForm, passwordForm, setupForm, recoveryForm, staffSetupForm, twoFactorForm, retailerActivationForm]
+            .forEach(function (form) { form.hidden = true; });
+        status.hidden = true;
+        const welcome = document.getElementById("login-welcome");
+        if (welcome) {
+            document.getElementById("login-welcome-name").textContent = user.name;
+            welcome.hidden = false;
+        }
+        window.setTimeout(function () { navigateForUser(user); }, welcome ? 1200 : 0);
+    }
+
+    function navigateForUser(user) {
         if (user.role === "retailer") {
             window.location.assign("retailer.html");
             return;
@@ -561,86 +594,127 @@ function initializePortalLogin() {
         window.location.assign("admin.html");
     }
 
+    function showMobileStep() {
+        selectedAccount = null;
+        preAuth = "";
+        showOnly(mobileForm);
+        document.getElementById("login-mobile").focus();
+    }
+
+    async function showTwoFactor(result) {
+        preAuth = result.preAuth;
+        twoFactorMode = result.twoFactor;
+        const enroll = twoFactorMode === "enroll";
+        document.getElementById("two-factor-enroll").hidden = !enroll;
+        document.getElementById("two-factor-verify-intro").hidden = enroll;
+        document.getElementById("two-factor-code").value = "";
+        if (enroll) {
+            const setup = await apiRequest("/api/auth/2fa/enroll-start", {
+                method: "POST", body: { preAuth: preAuth },
+            });
+            document.getElementById("two-factor-qr").src = setup.qr;
+            document.getElementById("two-factor-key").textContent = setup.manualKey;
+        }
+        showOnly(twoFactorForm);
+        document.getElementById("two-factor-code").focus();
+    }
+
     mobileForm.addEventListener("submit", async function (event) {
         event.preventDefault();
         const identifier = document.getElementById("login-mobile").value.trim();
-        if (!/^\d{10,15}$/.test(identifier) && !/^[A-Za-z]{2,5}\d{4,}$/.test(identifier)) {
-            setStatus("Enter a valid mobile number or official Retail ID.");
+        if (!/^\d{10,15}$/.test(identifier) && !/^[A-Za-z]{2,5}\d{4,}$/.test(identifier) &&
+            !/^APP-[A-Za-z0-9]{12}$/i.test(identifier)) {
+            setStatus("Enter a valid mobile number, Retail ID or Application ID.");
             return;
         }
         try {
             selectedAccount = await apiRequest("/api/auth/lookup", {
                 method: "POST",
-                body: { identifier: identifier },
+                body: { identifier: identifier, name: document.getElementById("login-name").value.trim() },
             });
-            document.getElementById("login-account-label").textContent =
-                selectedAccount.role === "retailer"
-                    ? "Sign in to Retail ID " + selectedAccount.identifier + "."
-                    : "Sign in to " + selectedAccount.name + " account.";
-            if (selectedAccount.role === "retailer" && !selectedAccount.passwordSet) {
+            const step = selectedAccount.step;
+            if (step === "staff_setup") {
+                staffSetupForm.reset();
+                showOnly(staffSetupForm);
+                document.getElementById("staff-setup-password").focus();
+            } else if (step === "activate") {
                 retailerActivationForm.reset();
                 showOnly(retailerActivationForm);
                 document.getElementById("retail-activation-mobile").focus();
-            } else if (!selectedAccount.passwordSet) {
-                document.getElementById("setup-title").textContent = "Create your " +
-                    (selectedAccount.role === "master" ? "Master Admin"
-                        : selectedAccount.role === "distributor" ? "Distributor"
-                            : "Sub-Admin") + " password";
-                document.getElementById("setup-name-field").hidden = selectedAccount.role !== "subadmin";
-                document.getElementById("setup-name").required = selectedAccount.role === "subadmin";
-                document.getElementById("setup-name").value = selectedAccount.role === "subadmin"
-                    ? selectedAccount.name : "";
-                const bootstrap = document.getElementById("bootstrap-token-field");
-                if (bootstrap) {
-                    bootstrap.hidden = selectedAccount.role !== "master";
-                    document.getElementById("bootstrap-token").required = selectedAccount.role === "master";
-                }
-                const activation = document.getElementById("activation-token-field");
-                if (activation) {
-                    activation.hidden = selectedAccount.role === "master";
-                    document.getElementById("activation-token").required = selectedAccount.role !== "master";
-                }
+            } else if (step === "bootstrap" || step === "setup") {
+                const isBootstrap = step === "bootstrap";
+                document.getElementById("setup-title").textContent = isBootstrap
+                    ? "Create owner password" : "Create your password";
+                document.getElementById("bootstrap-token-field").hidden = !isBootstrap;
+                document.getElementById("bootstrap-token").required = isBootstrap;
+                document.getElementById("activation-token-field").hidden = isBootstrap;
+                document.getElementById("activation-token").required = !isBootstrap;
                 showOnly(setupForm);
                 document.getElementById("setup-password").focus();
             } else {
-                const isSubAdmin = selectedAccount.role === "subadmin";
-                document.getElementById("login-name-field").hidden = !isSubAdmin;
-                document.getElementById("login-name").required = isSubAdmin;
-                document.getElementById("forgot-password").hidden = false;
                 document.getElementById("login-password").value = "";
                 showOnly(passwordForm);
-                document.getElementById(isSubAdmin ? "login-name" : "login-password").focus();
+                document.getElementById("login-password").focus();
             }
         } catch (error) {
-            if (identifier === MASTER_ADMIN_MOBILE && /could not be verified/i.test(error.message)) {
-                selectedAccount = { identifier: identifier, role: "master", name: "Master Admin", canSetup: true };
-                document.getElementById("setup-title").textContent = "Create Master Admin password";
-                document.getElementById("setup-name-field").hidden = true;
-                document.getElementById("setup-name").required = false;
-                const bootstrap = document.getElementById("bootstrap-token-field");
-                if (bootstrap) {
-                    bootstrap.hidden = false;
-                    document.getElementById("bootstrap-token").required = true;
-                }
-                const activation = document.getElementById("activation-token-field");
-                if (activation) {
-                    activation.hidden = true;
-                    document.getElementById("activation-token").required = false;
-                }
-                showOnly(setupForm);
-                document.getElementById("setup-password").focus();
-                return;
-            }
-            if (/could not be verified/i.test(error.message)) {
-                document.getElementById("operator-mobile").value = identifier;
-                document.getElementById("operator-name").value = "";
-                showOnly(operatorSetupForm);
-                document.getElementById("operator-name").focus();
-                return;
-            }
             setStatus(error.message);
         }
     });
+
+    staffSetupForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        if (!selectedAccount || !staffSetupForm.reportValidity()) return;
+        const password = document.getElementById("staff-setup-password").value;
+        const recovery = document.getElementById("staff-setup-recovery").value;
+        if (validatePassword(password)) {
+            setStatus(validatePassword(password));
+            return;
+        }
+        if (password !== document.getElementById("staff-setup-password-confirm").value ||
+            recovery !== document.getElementById("staff-setup-recovery-confirm").value) {
+            setStatus("The password and recovery phrase confirmations must match.");
+            return;
+        }
+        try {
+            await apiRequest("/api/auth/staff-setup", {
+                method: "POST",
+                body: {
+                    name: document.getElementById("login-name").value.trim(),
+                    mobile: selectedAccount.identifier,
+                    password: password,
+                    recovery: recovery,
+                },
+            });
+            showMobileStep();
+            document.getElementById("login-name").value = "";
+            document.getElementById("login-mobile").value = "";
+            setStatus("Setup confirmation submitted. You can sign in once the owner approves your account.");
+        } catch (error) {
+            setStatus(error.message);
+        }
+    });
+
+    twoFactorForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+        if (!preAuth || !twoFactorForm.reportValidity()) return;
+        try {
+            const route = twoFactorMode === "enroll" ? "/api/auth/2fa/enroll-verify" : "/api/auth/2fa/verify";
+            const result = await apiRequest(route, {
+                method: "POST",
+                body: { preAuth: preAuth, code: document.getElementById("two-factor-code").value.trim() },
+            });
+            document.getElementById("two-factor-qr").removeAttribute("src");
+            redirectForUser(result.user);
+        } catch (error) {
+            setStatus(error.message);
+            document.getElementById("two-factor-code").value = "";
+        }
+    });
+    document.getElementById("two-factor-cancel").addEventListener("click", function () {
+        document.getElementById("two-factor-qr").removeAttribute("src");
+        showMobileStep();
+    });
+    document.getElementById("staff-setup-back").addEventListener("click", showMobileStep);
 
     setupForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -657,23 +731,21 @@ function initializePortalLogin() {
             setStatus("Passwords must match, and the recovery phrase must match and contain at least 12 characters.");
             return;
         }
-        const name = selectedAccount.role === "subadmin"
-            ? document.getElementById("setup-name").value.trim() : selectedAccount.name;
-        if (selectedAccount.role === "subadmin" && normalizeName(name) !== normalizeName(selectedAccount.name)) {
-            setStatus("The name does not match the authorized Sub-Admin record.");
-            return;
-        }
         const payload = {
             identifier: selectedAccount.identifier,
-            name: name,
+            name: "",
             password: password,
             recovery: recovery,
             bootstrapToken: document.getElementById("bootstrap-token")?.value || "",
             activationToken: document.getElementById("activation-token")?.value || "",
         };
         try {
-            const route = selectedAccount.role === "master" ? "/api/auth/bootstrap" : "/api/auth/setup";
+            const route = selectedAccount.step === "bootstrap" ? "/api/auth/bootstrap" : "/api/auth/setup";
             const result = await apiRequest(route, { method: "POST", body: payload });
+            if (result.twoFactor) {
+                await showTwoFactor(result);
+                return;
+            }
             redirectForUser(result.user);
         } catch (error) {
             setStatus(error.message);
@@ -688,13 +760,12 @@ function initializePortalLogin() {
             password: document.getElementById("login-password").value,
             name: document.getElementById("login-name").value.trim(),
         };
-        if (selectedAccount.role === "subadmin" &&
-            normalizeName(payload.name) !== normalizeName(selectedAccount.name)) {
-            setStatus("The name and mobile number do not match the authorized Sub-Admin account.");
-            return;
-        }
         try {
             const result = await apiRequest("/api/auth/login", { method: "POST", body: payload });
+            if (result.twoFactor) {
+                await showTwoFactor(result);
+                return;
+            }
             redirectForUser(result.user);
         } catch (error) {
             setStatus(error.message);
@@ -768,24 +839,6 @@ function initializePortalLogin() {
         }
     });
 
-    operatorSetupForm.addEventListener("submit", async function (event) {
-        event.preventDefault();
-        if (!operatorSetupForm.reportValidity()) return;
-        try {
-            await apiRequest("/api/auth/operator-request", {
-                method: "POST",
-                body: {
-                    name: document.getElementById("operator-name").value.trim(),
-                    mobile: document.getElementById("operator-mobile").value.trim(),
-                },
-            });
-            showOnly(mobileForm);
-            setStatus("Your Sub-Admin setup request was submitted for Master Admin review.");
-        } catch (error) {
-            setStatus(error.message);
-        }
-    });
-
     document.getElementById("forgot-password").addEventListener("click", function () {
         document.getElementById("recovery-mobile").value = selectedAccount
             ? selectedAccount.mobile || selectedAccount.identifier
@@ -813,13 +866,219 @@ function initializePortalLogin() {
     });
 }
 
+function setNote(element, message) {
+    if (!element) return;
+    element.textContent = message;
+    element.hidden = false;
+}
+
+function ownerStaffCard(item, actions) {
+    const labels = {
+        whitelisted_pending_setup: "Awaiting staff password setup",
+        pending_owner_final_approval: "Pending your final approval",
+        ready_for_2fa: "Approved · authenticator not yet linked",
+        active: "Active · 2FA enrolled",
+        revoked: "Revoked",
+    };
+    return '<article class="application-card"><div class="application-details"><span class="application-type">' +
+        escapeHTML(item.role === "masteradmin" ? "Master Admin" : "Sub-Admin") + ' · ' +
+        escapeHTML(labels[item.status] || item.status) + '</span><h3>' + escapeHTML(item.name) + '</h3><p>' +
+        escapeHTML(item.mobile) + ' · ' + escapeHTML(item.scope) + '</p></div><div class="approval-actions">' +
+        actions.map(function (action) {
+            return '<button type="button" class="btn ' + (action[2] || "quiet") + '" data-staff-action="' + action[0] +
+                '" data-staff-id="' + escapeHTML(item.id) + '">' + action[1] + '</button>';
+        }).join("") + '</div></article>';
+}
+
+function initializeOwnerStaffAdmin(user) {
+    const isOwner = user.role === "master";
+    const canHelpline = isOwner || user.role === "masteradmin";
+    const ownerSection = document.getElementById("owner-staff-section");
+    const helplineSection = document.getElementById("helpline-section");
+    if (helplineSection) helplineSection.hidden = !canHelpline;
+    if (ownerSection) ownerSection.hidden = !isOwner;
+
+    if (canHelpline && helplineSection) {
+        const status = document.getElementById("helpline-status");
+        apiRequest("/api/admin/helpline").then(function (result) {
+            document.getElementById("helpline-phone").value = result.phone || "";
+        }).catch(function (error) { setNote(status, error.message); });
+        document.getElementById("helpline-form").addEventListener("submit", async function (event) {
+            event.preventDefault();
+            if (!event.currentTarget.reportValidity()) return;
+            try {
+                const result = await apiRequest("/api/admin/helpline", {
+                    method: "PUT", body: { phone: document.getElementById("helpline-phone").value.trim() },
+                });
+                setNote(status, "Helpline updated to " + result.phone + ". Approved partners will see it immediately.");
+            } catch (error) {
+                setNote(status, error.message);
+            }
+        });
+    }
+    if (!isOwner || !ownerSection) return;
+
+    const status = document.getElementById("owner-staff-status");
+    const queue = document.getElementById("owner-staff-queue");
+    const list = document.getElementById("owner-staff-list");
+
+    async function refresh() {
+        try {
+            const items = await apiRequest("/api/owner/staff");
+            const pending = items.filter(function (item) { return item.status === "pending_owner_final_approval"; });
+            queue.innerHTML = pending.length ? pending.map(function (item) {
+                return ownerStaffCard(item, [["approve", "Approve &amp; Unlock 2FA", "primary"], ["reject", "Reject"]]);
+            }).join("") : '<p class="empty-state">No staff are waiting for final approval.</p>';
+            list.innerHTML = items.length ? items.map(function (item) {
+                const actions = [];
+                if (item.status === "active" || item.status === "ready_for_2fa") {
+                    actions.push(["reset", "Reset 2FA &amp; password"]);
+                }
+                if (item.status !== "revoked") actions.push(["revoke", "Revoke access", "danger"]);
+                return ownerStaffCard(item, actions);
+            }).join("") : '<p class="empty-state">No staff have been pre-authorized yet.</p>';
+        } catch (error) {
+            setNote(status, error.message);
+        }
+    }
+
+    document.querySelectorAll("#preauth-masteradmin-form, #preauth-subadmin-form").forEach(function (form) {
+        form.addEventListener("submit", async function (event) {
+            event.preventDefault();
+            if (!form.reportValidity()) return;
+            const data = new FormData(form);
+            try {
+                await apiRequest("/api/owner/staff", {
+                    method: "POST",
+                    body: {
+                        role: form.dataset.role, name: String(data.get("name")).trim(),
+                        mobile: String(data.get("mobile")).trim(), scope: String(data.get("scope")).trim(),
+                    },
+                });
+                form.reset();
+                setNote(status, "Pre-authorized with status whitelisted_pending_setup. The staff member now sets a password from the login page.");
+                refresh();
+            } catch (error) {
+                setNote(status, error.message);
+            }
+        });
+    });
+    [queue, list].forEach(function (container) {
+        container.addEventListener("click", async function (event) {
+            const button = event.target.closest("[data-staff-action]");
+            if (!button) return;
+            try {
+                await apiRequest("/api/owner/staff/" + encodeURIComponent(button.dataset.staffId) + "/action", {
+                    method: "POST", body: { action: button.dataset.staffAction },
+                });
+                setNote(status, "Action completed: " + button.dataset.staffAction + ".");
+                refresh();
+            } catch (error) {
+                setNote(status, error.message);
+            }
+        });
+    });
+    refresh();
+}
+
+function initializeSupport(user, knownHelpline) {
+    const isPartner = user.role === "retailer" || user.role === "distributor";
+    const isStaff = user.role === "master" || user.role === "masteradmin" || user.role === "subadmin";
+    const status = document.getElementById("ticket-status");
+
+    if (isPartner) {
+        const section = document.getElementById("distributor-support-section");
+        if (section) section.hidden = false;
+        const helplineElement = document.getElementById("partner-helpline");
+        if (helplineElement) {
+            const show = function (phone) { helplineElement.textContent = phone || "Not available yet"; };
+            if (knownHelpline !== undefined) show(knownHelpline);
+            else apiRequest("/api/helpline").then(function (result) { show(result.phone); }).catch(function () { show(""); });
+        }
+        const form = document.getElementById("support-ticket-form");
+        const mine = document.getElementById("my-ticket-list");
+        const refreshMine = async function () {
+            try {
+                const tickets = await apiRequest("/api/support/tickets");
+                mine.innerHTML = tickets.length ? tickets.map(function (ticket) {
+                    return '<article class="application-card"><div class="application-details"><span class="application-type">' +
+                        escapeHTML(ticket.category) + ' · ' + escapeHTML(ticket.status) + '</span><h3>' +
+                        escapeHTML(ticket.subject) + '</h3><p>' + escapeHTML(ticket.message) + '</p><small>' +
+                        escapeHTML(ticket.id) + ' · ' + escapeHTML(formatDate(ticket.createdAt)) + '</small></div></article>';
+                }).join("") : '<p class="empty-state">You have not submitted any tickets.</p>';
+            } catch (error) {
+                setNote(status, error.message);
+            }
+        };
+        if (form) {
+            form.addEventListener("submit", async function (event) {
+                event.preventDefault();
+                if (!form.reportValidity()) return;
+                const data = new FormData(form);
+                try {
+                    await apiRequest("/api/support/tickets", {
+                        method: "POST",
+                        body: {
+                            category: String(data.get("category")), subject: String(data.get("subject")).trim(),
+                            message: String(data.get("message")).trim(),
+                        },
+                    });
+                    form.reset();
+                    setNote(status, "Your ticket was submitted. The support team will respond.");
+                    refreshMine();
+                } catch (error) {
+                    setNote(status, error.message);
+                }
+            });
+            refreshMine();
+        }
+    }
+
+    if (isStaff) {
+        const section = document.getElementById("support-tickets-section");
+        const container = document.getElementById("support-ticket-list");
+        if (!section || !container) return;
+        section.hidden = false;
+        const refreshAll = async function () {
+            try {
+                const tickets = await apiRequest("/api/support/tickets");
+                container.innerHTML = tickets.length ? tickets.map(function (ticket) {
+                    return '<article class="application-card"><div class="application-details"><span class="application-type">' +
+                        escapeHTML(ticket.category) + ' · ' + escapeHTML(ticket.status) + ' · ' + escapeHTML(ticket.role) +
+                        '</span><h3>' + escapeHTML(ticket.subject) + '</h3><p>' + escapeHTML(ticket.message) + '</p><small>' +
+                        escapeHTML(ticket.name) + ' · ' + escapeHTML(ticket.mobile) + ' · ' + escapeHTML(ticket.id) +
+                        '</small></div>' + (ticket.status === "open"
+                            ? '<div class="approval-actions"><button type="button" class="btn quiet" data-close-ticket="' +
+                                escapeHTML(ticket.id) + '">Close ticket</button></div>' : "") + '</article>';
+                }).join("") : '<p class="empty-state">No support tickets.</p>';
+            } catch (error) {
+                container.innerHTML = '<p class="empty-state">' + escapeHTML(error.message) + '</p>';
+            }
+        };
+        container.addEventListener("click", async function (event) {
+            const button = event.target.closest("[data-close-ticket]");
+            if (!button) return;
+            try {
+                await apiRequest("/api/support/tickets/" + encodeURIComponent(button.dataset.closeTicket) + "/close",
+                    { method: "POST", body: {} });
+                refreshAll();
+            } catch (error) {
+                container.insertAdjacentHTML("afterbegin", '<p class="empty-state">' + escapeHTML(error.message) + '</p>');
+            }
+        });
+        refreshAll();
+    }
+}
+
 function playWelcomeVoice(userName, role) {
     if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
         return;
     }
     const greeting = role === "master"
-        ? "Welcome to your Master Admin Panel, " + userName + "."
-        : role === "distributor"
+        ? "Welcome to your Super Admin Panel, " + userName + "."
+        : role === "masteradmin"
+            ? "Welcome Master Admin, " + userName + "."
+            : role === "distributor"
             ? "Welcome to your Distributor workspace, " + userName + "."
             : "Welcome Sub-Admin, " + userName + ".";
     window.speechSynthesis.cancel();
@@ -844,13 +1103,14 @@ function initializeOperationsDashboard() {
         ? readList("rm-demo-distributor-profile")[0] : null;
     const isMaster = Boolean(staff && staff.role === "master");
     const operator = distributorProfile || staff;
-    if (!staff || !["master", "subadmin", "distributor"].includes(staff.role) ||
+    if (!staff || !["master", "masteradmin", "subadmin", "distributor"].includes(staff.role) ||
         (isDistributorMode && !distributorProfile)) {
         accessDenied.hidden = false;
         return;
     }
 
     operationsContent.hidden = false;
+    initializePartnerNetwork(staff);
     if (!isDistributorMode) {
         const pendingWelcome = sessionStorage.getItem(PENDING_WELCOME_KEY);
         if (pendingWelcome) {
@@ -867,8 +1127,9 @@ function initializeOperationsDashboard() {
     }
     document.getElementById("operator-caption").textContent = operator.name + " · " +
         (isDistributorMode ? "Distributor workspace · " + operator.generatedId
-            : isMaster ? "Master Admin — ultimate control"
-                : "Sub-Admin / Operator — locked mobile ending " + operator.mobile.slice(-4));
+            : isMaster ? "Super Admin (Owner) — ultimate control"
+                : staff.role === "masteradmin" ? "Master Admin"
+                    : "Sub-Admin — locked mobile ending " + operator.mobile.slice(-4));
     if (isDistributorMode) {
         document.querySelector(".dashboard-heading .eyebrow").textContent = "DISTRIBUTOR WORKSPACE";
         document.querySelector(".dashboard-heading h1").textContent = "Local Retailer application queue";
@@ -888,6 +1149,8 @@ function initializeOperationsDashboard() {
     document.querySelectorAll(".master-only").forEach(function (section) {
         section.hidden = !isMaster;
     });
+    initializeOwnerStaffAdmin(staff);
+    initializeSupport(staff);
 
     const dashboardStatus = document.getElementById("dashboard-status");
     let pendingApproval = null;
@@ -1071,79 +1334,6 @@ function initializeOperationsDashboard() {
         }).join("");
     }
 
-    function renderOperatorRequests() {
-        const container = document.getElementById("operator-request-list");
-        if (!isMaster) {
-            return;
-        }
-        const requests = readList(OPERATOR_REQUESTS_KEY);
-        if (requests.length === 0) {
-            container.innerHTML = '<p class="empty-state">No Sub-Admin enrollment requests.</p>';
-            return;
-        }
-        container.innerHTML = requests.map(function (request) {
-            const pending = request.status === "pending";
-            const authorization = pending ? findAuthorizedOperator(request.mobile) : null;
-            const matchesWhitelist = authorization &&
-                normalizeName(authorization.name) === normalizeName(request.name);
-            const alreadyAssigned = readList(OPERATORS_KEY).some(function (item) {
-                return item.mobile === request.mobile;
-            });
-            const statusLabel = pending ? "Awaiting Master decision" :
-                request.status === "accepted" || request.status === "approved" ? "Accepted" : "Rejected";
-            const actions = pending
-                ? '<div class="approval-actions"><button type="button" class="btn primary" data-operator-action="approve" data-request-id="' +
-                    escapeHTML(request.id) + '"' + (!matchesWhitelist || alreadyAssigned ? " disabled" : "") +
-                    '>Accept</button><button type="button" class="btn quiet" data-operator-action="reject" data-request-id="' +
-                    escapeHTML(request.id) + '">Reject</button></div>'
-                : "";
-            const reason = pending && !matchesWhitelist
-                ? "This name/mobile pair is not currently on the authorization whitelist."
-                : pending && alreadyAssigned ? "This mobile number already has an operator account." : "";
-            return '<article class="application-card operator-request-card"><div class="application-details">' +
-                '<span class="application-type">' + statusLabel + '</span><h3>' + escapeHTML(request.name) + '</h3>' +
-                '<p>Requested mobile: <strong>' + escapeHTML(request.mobile) + '</strong></p>' +
-                '<small>Request ' + escapeHTML(request.id) + ' · ' + formatDate(request.requestedAt) + '</small>' +
-                '<p class="document-summary">' + escapeHTML(reason || (pending
-                    ? "Accept grants access only to this authorized name/mobile pair."
-                    : request.status === "rejected" ? "This request was terminated." : "Operator account was accepted by the Master Admin.")) +
-                '</p></div>' + actions + '</article>';
-        }).join("");
-    }
-
-    function renderOperatorWhitelist() {
-        if (!isMaster) {
-            return;
-        }
-        const container = document.getElementById("operator-whitelist-list");
-        const whitelist = readList(OPERATOR_WHITELIST_KEY);
-        if (whitelist.length === 0) {
-            container.innerHTML = '<p class="empty-state">No Sub-Admin identities are authorized yet. Add a name and mobile number above.</p>';
-            return;
-        }
-        container.innerHTML = whitelist.map(function (item) {
-            const itemStatus = item.status || "active";
-            const statusLabel = itemStatus === "active" ? "Active" :
-                itemStatus === "held" ? "On hold" :
-                    itemStatus === "banned" ? "Permanently banned" : "Revoked";
-            const statusClass = itemStatus === "active" ? "complete" : "pending";
-            const action = '<div class="operator-lifecycle-actions">' +
-                (itemStatus === "active"
-                    ? '<button type="button" class="btn quiet" data-whitelist-action="hold" data-whitelist-id="' + escapeHTML(item.id) + '">Hold access</button>'
-                    : "") +
-                '<button type="button" class="btn quiet" data-whitelist-action="reset" data-whitelist-id="' + escapeHTML(item.id) + '">Reset / Recover / Reactivate</button>' +
-                (itemStatus !== "banned"
-                    ? '<button type="button" class="btn danger" data-whitelist-action="ban" data-whitelist-id="' + escapeHTML(item.id) + '">Permanent ban</button>'
-                    : "") +
-                '<button type="button" class="btn quiet" data-whitelist-action="delete" data-whitelist-id="' + escapeHTML(item.id) + '">Delete &amp; allow re-add</button>' +
-                '</div>';
-            return '<article class="approval-card"><div><span class="status-pill ' +
-                statusClass + '">' + statusLabel +
-                '</span><p><strong>' + escapeHTML(item.name) + '</strong> · ' + escapeHTML(item.mobile) +
-                '</p><small>Added ' + formatDate(item.addedAt) + '</small></div>' + action + '</article>';
-        }).join("");
-    }
-
     function renderDistributorMappings() {
         if (!isMaster) {
             return;
@@ -1194,9 +1384,6 @@ function initializeOperationsDashboard() {
             return;
         }
         const profiles = readList(RETAIL_PROFILES_KEY);
-        const contact = readMasterContact();
-        document.getElementById("master-contact-email").value = contact.email;
-        document.getElementById("master-contact-mobile").value = contact.mobile;
         const container = document.getElementById("retailer-profile-list");
         container.innerHTML = profiles.length ? profiles.map(function (profile) {
             return '<article class="approval-card"><div><span class="status-pill ' +
@@ -1396,6 +1583,9 @@ function initializeOperationsDashboard() {
     }
 
     function updateDistributorNotifications(applicationId, status) {
+        if (!isMaster && !isDistributorMode) {
+            return;
+        }
         const notifications = readList(DISTRIBUTOR_NOTIFICATIONS_KEY);
         notifications.forEach(function (notification) {
             if (notification.applicationId === applicationId) {
@@ -1517,208 +1707,6 @@ function initializeOperationsDashboard() {
         document.getElementById("confirm-application-action").textContent = "Confirm action";
     });
 
-    document.getElementById("operator-request-list").addEventListener("click", function (event) {
-        const button = event.target.closest("[data-operator-action]");
-        if (!button || !isMaster) {
-            return;
-        }
-        const requests = readList(OPERATOR_REQUESTS_KEY);
-        const request = requests.find(function (item) {
-            return item.id === button.dataset.requestId && item.status === "pending";
-        });
-        if (!request) {
-            return;
-        }
-        request.status = button.dataset.operatorAction === "approve" ? "accepted" : "rejected";
-        request.reviewedAt = new Date().toISOString();
-        if (request.status === "accepted") {
-            const authorization = findAuthorizedOperator(request.mobile);
-            const operators = readList(OPERATORS_KEY);
-            if (!authorization || normalizeName(authorization.name) !== normalizeName(request.name)) {
-                setDashboardStatus("Acceptance blocked: the name/mobile pair no longer matches the Master Admin whitelist.");
-                return;
-            }
-            if (request.mobile === MASTER_ADMIN_MOBILE || operators.some(function (item) { return item.mobile === request.mobile; })) {
-                request.status = "rejected";
-                request.reason = "Mobile number is already assigned.";
-            } else {
-                operators.push({
-                    id: createReference("SUB"),
-                    name: request.name,
-                    mobile: request.mobile,
-                    lockedAt: new Date().toISOString(),
-                    status: "active"
-                });
-                writeList(OPERATORS_KEY, operators);
-            }
-        }
-        writeList(OPERATOR_REQUESTS_KEY, requests);
-        renderOperatorRequests();
-        setDashboardStatus(request.status === "accepted"
-            ? "Sub-Admin enrolled. The mobile number is now locked to this account and cannot be changed here."
-            : "Sub-Admin enrollment request rejected.");
-    });
-
-    document.getElementById("operator-whitelist-form").addEventListener("submit", function (event) {
-        event.preventDefault();
-        if (!isMaster || !event.currentTarget.reportValidity()) {
-            return;
-        }
-        const name = document.getElementById("whitelist-name").value.trim();
-        const mobile = document.getElementById("whitelist-mobile").value.trim();
-        const whitelist = readList(OPERATOR_WHITELIST_KEY);
-        const status = document.getElementById("whitelist-status");
-        if (!/^\d{10,15}$/.test(mobile) || mobile === MASTER_ADMIN_MOBILE) {
-            status.textContent = "Enter an authorized Sub-Admin mobile number; the Master Admin number cannot be added.";
-            status.hidden = false;
-            return;
-        }
-        if (!normalizeName(name)) {
-            status.textContent = "Enter the Sub-Admin's authorized name.";
-            status.hidden = false;
-            return;
-        }
-        const existing = whitelist.find(function (item) { return item.mobile === mobile; });
-        if (existing) {
-            if (existing.status === "banned") {
-                status.textContent = "This number is permanently banned. Use Reset / Recover / Reactivate or Delete & allow re-add before authorizing it again.";
-                status.hidden = false;
-                return;
-            }
-            if (existing.status === "held") {
-                status.textContent = "This number is on hold. Use Reset / Recover / Reactivate before changing its authorized identity.";
-                status.hidden = false;
-                return;
-            }
-            if (existing.status === "active" && normalizeName(existing.name) === normalizeName(name)) {
-                status.textContent = "This name and mobile number are already authorized.";
-                status.hidden = false;
-                return;
-            }
-            existing.name = name;
-            existing.status = "active";
-            existing.updatedAt = new Date().toISOString();
-            writeList(OPERATOR_WHITELIST_KEY, whitelist);
-            writeList(OPERATORS_KEY, readList(OPERATORS_KEY).filter(function (item) {
-                return item.mobile !== mobile;
-            }));
-            writeList(OPERATOR_REQUESTS_KEY, readList(OPERATOR_REQUESTS_KEY).filter(function (item) {
-                return item.mobile !== mobile;
-            }));
-            event.currentTarget.reset();
-            status.textContent = "Authorization updated. Old account credentials and requests were cleared; the operator can submit a fresh setup request.";
-            status.hidden = false;
-            renderOperatorWhitelist();
-            renderOperatorRequests();
-            return;
-        }
-        whitelist.unshift({
-            id: createReference("AUTHZ"),
-            name: name,
-            mobile: mobile,
-            addedAt: new Date().toISOString(),
-            status: "active"
-        });
-        writeList(OPERATOR_WHITELIST_KEY, whitelist);
-        event.currentTarget.reset();
-        status.textContent = "Authorized name/mobile pair added. The Sub-Admin may now request access.";
-        status.hidden = false;
-        renderOperatorWhitelist();
-        renderOperatorRequests();
-    });
-
-    document.getElementById("operator-whitelist-list").addEventListener("click", async function (event) {
-        const button = event.target.closest("[data-whitelist-action]");
-        if (!button || !isMaster) {
-            return;
-        }
-        const whitelist = readList(OPERATOR_WHITELIST_KEY);
-        const identity = whitelist.find(function (item) {
-            return item.id === button.dataset.whitelistId;
-        });
-        if (!identity) {
-            return;
-        }
-        const mobile = identity.mobile;
-        const action = button.dataset.whitelistAction;
-        const operators = readList(OPERATORS_KEY);
-        const requests = readList(OPERATOR_REQUESTS_KEY);
-        let requestsToSave = null;
-        if (action === "hold") {
-            identity.status = "held";
-            operators.forEach(function (item) {
-                if (item.mobile === mobile) item.status = "held";
-            });
-        } else if (action === "ban") {
-            identity.status = "banned";
-            identity.bannedAt = new Date().toISOString();
-            operators.forEach(function (item) {
-                if (item.mobile === mobile) item.status = "banned";
-            });
-        } else if (action === "reset") {
-            identity.status = "active";
-            delete identity.bannedAt;
-            delete identity.heldAt;
-            operators.forEach(function (item) {
-                if (item.mobile === mobile) item.status = "active";
-            });
-            requestsToSave = requests.filter(function (item) {
-                return item.mobile !== mobile;
-            });
-        } else if (action === "delete") {
-            const whitelistSave = await writeList(
-                OPERATOR_WHITELIST_KEY,
-                whitelist.filter(function (item) { return item.id !== identity.id; })
-            );
-            const operatorSave = await writeList(
-                OPERATORS_KEY,
-                operators.filter(function (item) { return item.mobile !== mobile; })
-            );
-            const requestSave = await writeList(
-                OPERATOR_REQUESTS_KEY,
-                requests.filter(function (item) { return item.mobile !== mobile; })
-            );
-            if (whitelistSave === null || operatorSave === null || requestSave === null) {
-                setDashboardStatus("The Sub-Admin records could not all be deleted. Review server status before retrying.");
-                return;
-            }
-            renderOperatorWhitelist();
-            renderOperatorRequests();
-            setDashboardStatus("Sub-Admin authorization, account and requests deleted. The mobile number can now be added again from scratch.");
-            return;
-        }
-        identity.updatedAt = new Date().toISOString();
-        const whitelistSave = await writeList(OPERATOR_WHITELIST_KEY, whitelist);
-        const operatorSave = await writeList(OPERATORS_KEY, operators);
-        const requestSave = requestsToSave
-            ? await writeList(OPERATOR_REQUESTS_KEY, requestsToSave)
-            : null;
-        if (whitelistSave === null || operatorSave === null ||
-            (action === "reset" && requestSave === null)) {
-            setDashboardStatus("The Sub-Admin lifecycle change could not be fully saved. Review server status before retrying.");
-            return;
-        }
-        if (action === "reset") {
-            try {
-                const reset = await apiRequest(
-                    "/api/admin/accounts/" + encodeURIComponent(mobile) + "/reset",
-                    { method: "POST", body: {} }
-                );
-                setDashboardStatus("Password reset. One-time setup code for " + reset.identifier + ": " +
-                    reset.code + ". Share only through a separately verified channel; expires in 7 days.");
-            } catch (error) {
-                setDashboardStatus(error.message);
-            }
-        }
-        renderOperatorWhitelist();
-        renderOperatorRequests();
-        if (action === "hold") {
-            setDashboardStatus("Sub-Admin placed on hold. Access and approvals are paused until reset/reactivation.");
-        } else if (action === "ban") {
-            setDashboardStatus("Sub-Admin permanently banned. The number cannot re-register until the Master Admin resets or deletes the record.");
-        }
-    });
-
     document.getElementById("distributor-mapping-list").addEventListener("submit", function (event) {
         const form = event.target.closest(".distributor-mapping-form");
         if (!form || !isMaster || !ensureCurrentOperatorAccess()) {
@@ -1825,20 +1813,6 @@ function initializeOperationsDashboard() {
         renderRetailerProfiles();
     });
 
-    document.getElementById("master-contact-form").addEventListener("submit", function (event) {
-        event.preventDefault();
-        const form = event.currentTarget;
-        if (!isMaster || !ensureCurrentOperatorAccess() || !form.reportValidity()) {
-            return;
-        }
-        const email = String(new FormData(form).get("email")).trim();
-        writeMasterContact({ name: "RAHAMTULLA MONDAL", mobile: MASTER_ADMIN_MOBILE, email: email });
-        const status = document.getElementById("retailer-profile-status");
-        status.textContent = "Master Distributor upline contact details saved.";
-        status.hidden = false;
-        renderRetailerProfiles();
-    });
-
     document.getElementById("upline-request-list").addEventListener("click", function (event) {
         const button = event.target.closest("[data-upline-action]");
         if (!button || !isMaster || !ensureCurrentOperatorAccess()) {
@@ -1917,8 +1891,6 @@ function initializeOperationsDashboard() {
             renderApplications();
             renderCustomerDocuments();
             renderDistributorMappings();
-            renderOperatorRequests();
-            renderOperatorWhitelist();
             renderCriticalRequests();
             renderRetailerProfiles();
             renderUplineRequests();
@@ -1935,11 +1907,175 @@ function initializeOperationsDashboard() {
     renderApplications();
     renderCustomerDocuments();
     renderDistributorMappings();
-    renderOperatorRequests();
-    renderOperatorWhitelist();
     renderCriticalRequests();
     renderRetailerProfiles();
     renderUplineRequests();
+}
+
+function networkCell(text, className) {
+    const span = document.createElement("span");
+    span.textContent = text;
+    if (className) span.className = className;
+    return span;
+}
+
+function networkButton(label, handler) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn quiet";
+    button.textContent = label;
+    button.addEventListener("click", handler);
+    return button;
+}
+
+function initializePartnerNetwork(staff) {
+    const status = document.getElementById("network-status");
+    function say(message) {
+        status.textContent = message;
+        status.hidden = false;
+    }
+    async function act(applicationId, action, reason) {
+        try {
+            const result = await apiRequest("/api/admin/partners/" + encodeURIComponent(applicationId) + "/action", {
+                method: "POST", body: { action: action, reason: reason || "" },
+            });
+            const codes = (result.setupCodes || []).map(function (item) {
+                return item.identifier + " one-time setup code: " + item.code;
+            });
+            say("Partner " + result.status + ". " + codes.join(" "));
+            await load();
+        } catch (error) {
+            say(error.message);
+        }
+    }
+    function pill(statusValue) {
+        const css = statusValue === "approved" ? "complete" : "pending";
+        return networkCell(statusValue.replace("_", " "), "status-pill " + css);
+    }
+
+    async function loadDistributorView() {
+        const section = document.getElementById("distributor-network-section");
+        const result = await apiRequest("/api/distributor/retailers");
+        section.hidden = false;
+        document.getElementById("net-total").textContent = result.summary.total;
+        document.getElementById("net-active").textContent = result.summary.active;
+        document.getElementById("net-pending").textContent = result.summary.pending;
+        document.getElementById("net-transactions").textContent = result.summary.transactions;
+        const list = document.getElementById("distributor-network-list");
+        list.replaceChildren();
+        if (!result.retailers.length) {
+            const empty = document.createElement("p");
+            empty.className = "empty-state";
+            empty.textContent = "No Retailers are mapped to your Distributor ID yet.";
+            list.append(empty);
+        }
+        result.retailers.forEach(function (item) {
+            const card = document.createElement("article");
+            card.className = "application-card network-row";
+            card.append(
+                networkCell(item.name + (item.business ? " — " + item.business : ""), "network-name"),
+                networkCell(item.retailerId ? "Retail ID " + item.retailerId : "Awaiting approval"),
+                networkCell(item.mobile + " · " + item.city + (item.pin ? " · PIN " + item.pin : "")),
+                networkCell(item.transactionCount + " transaction(s)"),
+                pill(item.status + (item.active ? " (active)" : "")),
+            );
+            if (item.status === "pending") {
+                card.append(
+                    networkButton("Approve", function () { act(item.applicationId, "approve"); }),
+                    networkButton("Reject", function () {
+                        const reason = window.prompt("Reason for rejection (shown to the applicant):", "");
+                        if (reason !== null) act(item.applicationId, "reject", reason);
+                    }),
+                );
+            }
+            list.append(card);
+        });
+    }
+
+    async function loadAdminView() {
+        const section = document.getElementById("partner-network-section");
+        const result = await apiRequest("/api/admin/network");
+        section.hidden = false;
+        const list = document.getElementById("partner-network-list");
+        list.replaceChildren();
+        const approvedDistributors = result.distributors.filter(function (item) { return item.status === "approved"; });
+        function actions(item) {
+            const box = document.createElement("div");
+            box.className = "network-actions";
+            if (item.status === "pending") box.append(networkButton("Approve", function () { act(item.applicationId, "approve"); }));
+            if (item.status === "approved") box.append(networkButton("Suspend", function () {
+                const reason = window.prompt("Reason for suspension:", "");
+                if (reason !== null) act(item.applicationId, "suspend", reason);
+            }));
+            if (item.status === "suspended") box.append(networkButton("Reactivate", function () { act(item.applicationId, "reactivate"); }));
+            return box;
+        }
+        result.distributors.forEach(function (distributor) {
+            const group = document.createElement("article");
+            group.className = "application-card network-group";
+            group.append(
+                networkCell(distributor.name + " (" + (distributor.partnerId || "pending") + ")", "network-name"),
+                networkCell([distributor.jurisdiction, distributor.city, distributor.pincodes.length
+                    ? "PIN " + distributor.pincodes.join(", ") : ""].filter(Boolean).join(" · ")),
+                networkCell(distributor.mobile + " · " + distributor.retailerCount + " retailer(s), " +
+                    distributor.activeRetailerCount + " active"),
+                pill(distributor.status), actions(distributor),
+            );
+            result.retailers.filter(function (r) { return r.distributorApplicationId === distributor.applicationId; })
+                .forEach(function (retailer) { group.append(retailerRow(retailer)); });
+            list.append(group);
+        });
+        const unassigned = result.retailers.filter(function (r) {
+            return !result.distributors.some(function (d) { return d.applicationId === r.distributorApplicationId; });
+        });
+        if (unassigned.length) {
+            const group = document.createElement("article");
+            group.className = "application-card network-group";
+            group.append(networkCell("Master Admin queue (no Distributor assigned)", "network-name"));
+            unassigned.forEach(function (retailer) { group.append(retailerRow(retailer)); });
+            list.append(group);
+        }
+        function retailerRow(retailer) {
+            const row = document.createElement("div");
+            row.className = "network-row";
+            const select = document.createElement("select");
+            select.setAttribute("aria-label", "Re-assign " + retailer.name + " to a Distributor");
+            const none = new Option("Master Admin queue", "");
+            select.append(none);
+            approvedDistributors.forEach(function (d) {
+                select.append(new Option(d.name + " (" + d.partnerId + ")", d.applicationId));
+            });
+            select.value = retailer.distributorApplicationId || "";
+            select.addEventListener("change", async function () {
+                try {
+                    await apiRequest("/api/admin/retailers/" + encodeURIComponent(retailer.applicationId) + "/reassign", {
+                        method: "POST", body: { distributorApplicationId: select.value },
+                    });
+                    say(retailer.name + " was re-assigned.");
+                    await load();
+                } catch (error) {
+                    say(error.message);
+                    select.value = retailer.distributorApplicationId || "";
+                }
+            });
+            row.append(
+                networkCell(retailer.name + (retailer.partnerId ? " (" + retailer.partnerId + ")" : ""), "network-name"),
+                networkCell(retailer.mobile + " · " + retailer.city + (retailer.pin ? " · PIN " + retailer.pin : "")),
+                pill(retailer.status), select, actions(retailer),
+            );
+            return row;
+        }
+    }
+
+    async function load() {
+        try {
+            if (staff.role === "distributor") await loadDistributorView();
+            else await loadAdminView();
+        } catch (error) {
+            say(error.message);
+        }
+    }
+    load();
 }
 
 function initializeRetailerDashboard() {
@@ -1951,32 +2087,25 @@ function initializeRetailerDashboard() {
         return;
     }
     const profile = PORTAL_RETAILER.profile;
-    const upline = PORTAL_RETAILER.upline;
     content.hidden = false;
     document.getElementById("retailer-welcome").textContent = "Welcome, " + profile.name;
     document.getElementById("retailer-profile-id").textContent = profile.userId;
     document.getElementById("retailer-profile-name").textContent = profile.name;
     document.getElementById("retailer-profile-mobile").textContent = profile.mobile;
     document.getElementById("retailer-profile-email").textContent = profile.email || "Not configured";
-    document.querySelector("#retailer-profile-content .profile-card:nth-child(2) dd").textContent =
-        upline.name || "RAHAMTULLA MONDAL";
-    document.querySelector("#retailer-profile-content .profile-card:nth-child(2) dl div:nth-child(2) dd").textContent =
-        upline.mobile || MASTER_ADMIN_MOBILE;
-    document.getElementById("upline-email").textContent = upline.email || "Not configured";
-    const status = document.getElementById("retailer-profile-status");
-    document.getElementById("change-upline-request").addEventListener("click", async function () {
-        try {
-            await apiRequest("/api/retailer/upline-request", {
-                method: "POST",
-                body: { reason: "" },
-            });
-            status.textContent = "Your Change Upline request was sent to the Master Admin for review.";
-            status.hidden = false;
-        } catch (error) {
-            status.textContent = error.message;
-            status.hidden = false;
-        }
-    });
+    const distributor = PORTAL_RETAILER.distributor;
+    if (distributor) {
+        document.getElementById("assigned-distributor-card").hidden = false;
+        document.getElementById("distributor-name").textContent = distributor.name;
+        document.getElementById("distributor-id").textContent = distributor.distributorId || "—";
+        document.getElementById("distributor-mobile").textContent = distributor.mobile +
+            (distributor.email ? " · " + distributor.email : "");
+        const area = distributor.area || {};
+        document.getElementById("distributor-area").textContent = [
+            area.jurisdiction, area.city, (area.pincodes || []).length ? "PIN " + area.pincodes.join(", ") : "",
+        ].filter(Boolean).join(" · ") || "Not recorded";
+    }
+    initializeSupport(PORTAL_USER, PORTAL_RETAILER.helpline);
     document.getElementById("retailer-signout").addEventListener("click", async function () {
         try {
             await apiRequest("/api/auth/logout", { method: "POST", body: {} });
@@ -2139,19 +2268,6 @@ function readList(key) {
     return Array.isArray(value) ? JSON.parse(JSON.stringify(value)) : [];
 }
 
-function readMasterContact() {
-    const contact = (PORTAL_STATE[MASTER_CONTACT_KEY] || [])[0] ||
-        { name: "RAHAMTULLA MONDAL", mobile: MASTER_ADMIN_MOBILE, email: "" };
-    if (!contact || typeof contact !== "object" || typeof contact.email !== "string") {
-        throw new Error("Master Distributor contact details are invalid. Update them from the Master Admin dashboard.");
-    }
-    return contact;
-}
-
-function writeMasterContact(contact) {
-    writeList(MASTER_CONTACT_KEY, [contact]);
-}
-
 function normalizeApplicationStatus(application) {
     return String(application.status || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
@@ -2215,12 +2331,6 @@ function writeList(key, value) {
     });
     PORTAL_WRITE_QUEUES.set(key, next);
     return next;
-}
-
-function findAuthorizedOperator(mobile) {
-    return readList(OPERATOR_WHITELIST_KEY).find(function (item) {
-        return item.mobile === mobile && item.status === "active";
-    }) || null;
 }
 
 function normalizeName(name) {

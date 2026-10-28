@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#6d28d9">
+    <meta name="robots" content="noindex">
+    <title>Dashboard | R.M Digital Centre</title>
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="dashboard.css">
+</head>
+<body class="dash-body">
+    <div class="preview-banner" id="preview-banner" role="alert" hidden>Preview Mode: Real transactions are disabled.</div>
+    <header class="dash-header">
+        <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Toggle menu" aria-controls="dash-sidebar" aria-expanded="false">&#9776;</button>
+        <div class="brand"><img src="icon.svg" alt="" width="32" height="32"><span><strong>R.M</strong> Digital Centre</span></div>
+        <div class="wallet-bar" aria-label="Wallet">
+            <div class="wallet-info">
+                <span class="wallet-label">Available Balance</span>
+                <strong id="wallet-balance">...</strong>
+            </div>
+            <button class="wallet-link" id="wallet-statement" type="button">Wallet Statement</button>
+            <button class="add-money" id="add-money" type="button">+ Add Money</button>
+        </div>
+        <div class="partner-chip"><span id="partner-name">Loading...</span><small id="partner-id"></small></div>
+    </header>
+    <div class="dash-layout">
+        <nav class="dash-sidebar" id="dash-sidebar" aria-label="Dashboard menu"></nav>
+        <main class="dash-main" id="dash-main"><p class="dash-loading" id="dash-loading">Loading dashboard...</p></main>
+    </div>
+    <div class="modal-backdrop" id="modal" hidden>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+            <button class="modal-close" id="modal-close" type="button" aria-label="Close">&times;</button>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+    <script src="dashboard.js"></script>
+</body>
+</html>
