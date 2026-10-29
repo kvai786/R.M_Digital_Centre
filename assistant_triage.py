@@ -33,6 +33,9 @@ IDENTITY_PATTERNS = [
     r"(?i)\b(name|details|who).{0,20}\b(owner|founder|creator|developer|programmer)\b",
     r"(?i)\b(openai|chat\s*gpt|gpt-?\d*|google\s*ai|gemini|bard|llama|claude|anthropic|copilot|mistral|deepseek)\b",
     r"(?i)\b(which|what)\s*(llm|model|ai|language\s*model)\b",
+    r"(?i)\bwho\s*(are|is|were)\s*(your|the)\s*(owner|founder|creator|developer|programmer|engineer|maker)s?\b",
+    r"(?i)\b(your|ur)\s*(owner|founder|creator|developer|programmer|engineer|maker)s?\b",
+    r"(?i)\b(source\s*code|code\s*base|codebase|tech(nology)?\s*stack|powered\s*by|programmed\s*(by|in))\b",
     r"(?i)ignore\s*(all\s*|any\s*)?(the\s*)?(previous|prior|above|earlier)\s*(instructions|rules|prompts?)",
     r"(?i)(system\s*prompt|developer\s*mode|reveal\s*(your\s*)?(prompt|instructions)|jailbreak|act\s*as\s*dan)",
     r"(?i)(forget|disregard)\s*(your|all|the)\s*(rules|instructions|guidelines)",
@@ -67,6 +70,9 @@ BANNED_LIVE_PATTERNS = [
 _extra_names = [n.strip() for n in os.environ.get("ASSISTANT_BANNED_NAMES", "").split(",") if n.strip()]
 if _extra_names:
     BANNED_LIVE_PATTERNS.append(r"(?i)(" + "|".join(re.escape(n) for n in _extra_names) + ")")
+
+# Third-party AI provider names (plus any private names from the environment) that must never reach users.
+BRAND_PATTERNS = [BANNED_LIVE_PATTERNS[0]] + BANNED_LIVE_PATTERNS[3:]
 
 _ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"))
 

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <meta name="referrer" content="no-referrer">
+    <title>Supreme Owner Console | R.M Digital Centre</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/supreme-owner/assets/owner.css">
+    <link rel="stylesheet" href="/assistant.css">
+</head>
+<body>
+    <a class="skip-link" href="#oc-main">Skip to content</a>
+    <header class="oc-top">
+        <div class="oc-brand">
+            <img src="/icon.svg" alt="" width="36" height="36">
+            <div><strong>R.M Digital Centre</strong><span>Supreme Owner Console</span></div>
+        </div>
+        <div class="oc-top-actions">
+            <span class="oc-chip" id="oc-owner-name"></span>
+            <button class="oc-btn ghost" id="oc-replay-greeting" type="button">&#128266; Replay greeting</button>
+            <button class="oc-btn danger" id="oc-signout" type="button">Sign out</button>
+        </div>
+    </header>
+
+    <div class="oc-banner" id="oc-greeting-banner" hidden>
+        <span>Your browser blocked the automatic welcome greeting.</span>
+        <button class="oc-btn" id="oc-play-greeting" type="button">&#128266; Play greeting</button>
+    </div>
+
+    <nav class="oc-tabs" aria-label="Console sections">
+        <button type="button" data-tab="overview" aria-selected="true">Overview</button>
+        <button type="button" data-tab="staff" aria-selected="false">Staff</button>
+        <button type="button" data-tab="security" aria-selected="false">Security</button>
+        <button type="button" data-tab="logs" aria-selected="false">System logs</button>
+        <button type="button" data-tab="database" aria-selected="false">Database</button>
+        <button type="button" data-tab="ai" aria-selected="false">AI Control Center</button>
+    </nav>
+
+    <main id="oc-main" class="oc-main">
+        <p class="oc-status" id="oc-status" role="status" aria-live="polite" hidden></p>
+
+        <section data-panel="overview" aria-labelledby="ov-title">
+            <h1 id="ov-title">Overview</h1>
+            <div class="oc-cards" id="ov-cards"></div>
+        </section>
+
+        <section data-panel="staff" aria-labelledby="staff-title" hidden>
+            <h1 id="staff-title">Master Admins and Sub-Admins</h1>
+            <p class="oc-hint">Staff cannot register publicly. Pre-authorize them here; they set their own password at login and wait for your final approval, then enroll an authenticator.</p>
+            <form class="oc-card oc-grid" id="staff-form">
+                <label>Role
+                    <select name="role" required>
+                        <option value="masteradmin">Master Admin</option>
+                        <option value="subadmin">Sub-Admin</option>
+                    </select>
+                </label>
+                <label>Full name<input name="name" minlength="2" maxlength="80" autocomplete="off" required></label>
+                <label>Mobile number<input name="mobile" type="tel" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" required></label>
+                <label>Region / scope<input name="scope" minlength="2" maxlength="120" autocomplete="off" required></label>
+                <button class="oc-btn" type="submit">Pre-authorize</button>
+            </form>
+            <div class="oc-card">
+                <h2>Partner first-login code</h2>
+                <p class="oc-hint">Only you can see setup codes. Enter the approved application ID (APP-...) to issue a fresh 7-day code, then share it through a separately verified channel.</p>
+                <form id="code-form" class="oc-toolbar">
+                    <label>Application ID<input id="code-app-id" maxlength="80" autocomplete="off" required></label>
+                    <button class="oc-btn" type="submit">Issue code</button>
+                </form>
+                <div class="oc-result" id="code-result" hidden></div>
+            </div>
+            <div class="oc-list" id="staff-list" aria-live="polite"></div>
+        </section>
+
+        <section data-panel="security" aria-labelledby="sec-title" hidden>
+            <h1 id="sec-title">Security settings</h1>
+            <div class="oc-card"><table class="oc-table" id="sec-table"></table></div>
+            <div class="oc-card oc-grid">
+                <div>
+                    <h2>Clear login lockouts</h2>
+                    <p class="oc-hint">Removes all failed-attempt counters and active lockouts.</p>
+                    <button class="oc-btn" id="sec-clear-lockouts" type="button">Clear lockouts</button>
+                </div>
+                <form id="sec-revoke-form">
+                    <h2>Sign out every other session</h2>
+                    <p class="oc-hint">Ends all sessions except this one. Confirm with your password.</p>
+                    <label>Your password<input id="sec-password" type="password" maxlength="128" autocomplete="current-password" required></label>
+                    <button class="oc-btn danger" type="submit">Revoke sessions</button>
+                </form>
+            </div>
+        </section>
+
+        <section data-panel="logs" aria-labelledby="logs-title" hidden>
+            <h1 id="logs-title">System logs</h1>
+            <div class="oc-toolbar">
+                <label>Action<select id="log-action"><option value="">All actions</option></select></label>
+                <button class="oc-btn ghost" id="log-refresh" type="button">Refresh</button>
+            </div>
+            <div class="oc-card oc-scroll"><table class="oc-table" id="log-table"></table></div>
+            <button class="oc-btn ghost" id="log-more" type="button" hidden>Load older entries</button>
+        </section>
+
+        <section data-panel="database" aria-labelledby="db-title" hidden>
+            <h1 id="db-title">Database</h1>
+            <div class="oc-card"><table class="oc-table" id="db-info"></table></div>
+            <h2>Table sizes</h2>
+            <div class="oc-card"><table class="oc-table" id="db-tables"></table></div>
+            <p class="oc-hint" id="db-note"></p>
+        </section>
+
+        <section data-panel="ai" aria-labelledby="ai-title" hidden>
+            <h1 id="ai-title">AI Control Center</h1>
+            <p class="oc-hint">Changes go live for the next message on both assistants. The built-in engine answers from the knowledge entries; system prompts are stored and versioned for any model you connect later.</p>
+            <div class="oc-toolbar">
+                <span class="oc-chip" id="ai-meta"></span>
+                <button class="oc-btn" id="ai-save" type="button">Save and publish</button>
+                <button class="oc-btn ghost" id="ai-reload" type="button">Discard changes</button>
+                <button class="oc-btn danger" id="ai-reset" type="button">Reset to defaults</button>
+            </div>
+            <nav class="oc-subtabs" aria-label="AI sections">
+                <button type="button" data-subtab="global" aria-selected="true">Global</button>
+                <button type="button" data-subtab="public" aria-selected="false">Visitor AI</button>
+                <button type="button" data-subtab="portal" aria-selected="false">Portal AI</button>
+                <button type="button" data-subtab="conversations" aria-selected="false">Conversations</button>
+                <button type="button" data-subtab="test" aria-selected="false">Live test</button>
+            </nav>
+
+            <div data-subpanel="global" class="oc-card">
+                <label class="oc-check"><input type="checkbox" id="ai-log"> Record conversations for monitoring (numbers of 6+ digits are redacted)</label>
+                <label>Reply to identity / creator / model questions<textarea id="ai-identity" rows="3" maxlength="300"></textarea></label>
+            </div>
+
+            <div data-subpanel="public" class="oc-card" hidden>
+                <label class="oc-check"><input type="checkbox" id="pub-enabled"> Show the robot assistant on the public homepage</label>
+                <label>Greeting bubble<input id="pub-greeting" maxlength="40"></label>
+                <label>System prompt<textarea id="pub-prompt" rows="8" maxlength="4000"></textarea></label>
+                <label>Refusal message (off-topic or malicious requests)<textarea id="pub-refusal" rows="2" maxlength="300"></textarea></label>
+                <h2>Knowledge entries</h2>
+                <p class="oc-hint">The visitor assistant answers only from these entries. Anything else gets the refusal message.</p>
+                <div id="pub-knowledge"></div>
+                <button class="oc-btn ghost" id="pub-add" type="button">Add entry</button>
+            </div>
+
+            <div data-subpanel="portal" class="oc-card" hidden>
+                <label class="oc-check"><input type="checkbox" id="por-enabled"> Enable the signed-in assistant</label>
+                <label>System prompt<textarea id="por-prompt" rows="8" maxlength="4000"></textarea></label>
+                <label>Fallback reply<textarea id="por-fallback" rows="2" maxlength="300"></textarea></label>
+                <h2>Knowledge entries</h2>
+                <p class="oc-hint">Tick the roles allowed to receive each answer. An entry with no roles ticked is available to everyone who is signed in.</p>
+                <div id="por-knowledge"></div>
+                <button class="oc-btn ghost" id="por-add" type="button">Add entry</button>
+            </div>
+
+            <div data-subpanel="conversations" class="oc-card" hidden>
+                <div class="oc-toolbar">
+                    <label>Channel
+                        <select id="conv-channel">
+                            <option value="">All</option>
+                            <option value="public">Visitor</option>
+                            <option value="portal">Portal</option>
+                        </select>
+                    </label>
+                    <button class="oc-btn ghost" id="conv-refresh" type="button">Refresh</button>
+                </div>
+                <div class="oc-list" id="conv-list"></div>
+            </div>
+
+            <div data-subpanel="test" class="oc-card" hidden>
+                <p class="oc-hint">Tests the draft currently on screen, including unsaved edits. Nothing is logged.</p>
+                <div class="oc-grid">
+                    <label>Channel
+                        <select id="test-channel">
+                            <option value="public">Visitor</option>
+                            <option value="portal">Portal</option>
+                        </select>
+                    </label>
+                    <label>Role (portal only)
+                        <select id="test-role">
+                            <option value="retailer">Retailer</option>
+                            <option value="distributor">Distributor</option>
+                            <option value="subadmin">Sub-Admin</option>
+                            <option value="masteradmin">Master Admin</option>
+                            <option value="master">Supreme Owner</option>
+                        </select>
+                    </label>
+                </div>
+                <label>Message<input id="test-message" maxlength="500" autocomplete="off"></label>
+                <button class="oc-btn" id="test-run" type="button">Send test message</button>
+                <div class="oc-result" id="test-result" aria-live="polite" hidden></div>
+            </div>
+        </section>
+    </main>
+    <script src="/supreme-owner/assets/owner.js"></script>
+    <script src="/portal-assistant.js"></script>
+</body>
+</html>

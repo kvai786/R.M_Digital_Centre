@@ -21,8 +21,8 @@ from typing import Any, AsyncGenerator
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, func, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -35,10 +35,18 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.responses import StreamingResponse
 
-from assistant_triage import RateLimiter, handle_chat
+from assistant_control import (
+    CONFIG_KEY as AI_CONFIG_KEY, default_config as default_ai_config, normalize_config as normalize_ai_config,
+    redact_for_log, run_chat, safe_config as safe_ai_config,
+)
+from assistant_triage import RateLimiter
 
 ASSISTANT_LIMITER = RateLimiter(limit=15, window_seconds=60)
+PUBLIC_ASSISTANT_LIMITER = RateLimiter(limit=10, window_seconds=60)
 BASE_DIR = Path(__file__).resolve().parent
+OWNER_CONSOLE_DIR = BASE_DIR / "owner_console"
+OWNER_CONSOLE_ASSETS = {"owner.js", "owner.css"}
+AI_LOG_ACTIONS = {"public": "ai_public_chat", "portal": "ai_portal_chat"}
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_DOCUMENT_BYTES = 40 * 1024 * 1024
@@ -84,13 +92,15 @@ TOTP_ISSUER = "R.M Digital Centre"
 HELPLINE_KEY = "helpline"
 SUPPORT_TICKETS_KEY = "rm-support-tickets"
 KYC_RETENTION_DAYS = 7
+PENDING_KYC_RETENTION_DAYS = 30
+REVIEW_IN_PROGRESS_STATUSES = ("pending", "correction_required")
 KYC_PURGE_STATUSES = {"approved", "rejected", "blocked"}
 CSRF_COOKIE_NAME = "rm_csrf"
 CSRF_EXEMPT_PATHS = {
     "/api/auth/login", "/api/auth/lookup", "/api/auth/setup", "/api/auth/bootstrap",
     "/api/auth/recover", "/api/retailer/activate", "/api/auth/staff-setup",
     "/api/auth/2fa/enroll-start", "/api/auth/2fa/enroll-verify", "/api/auth/2fa/verify",
-    "/api/applications", "/api/service-enquiries", "/api/scan-document",
+    "/api/applications", "/api/service-enquiries", "/api/scan-document", "/api/public/assistant/chat",
 }
 APPLICATION_RATE_LIMIT = 10
 APPLICATION_RATE_WINDOW = timedelta(hours=1)
@@ -99,7 +109,7 @@ STATIC_FILES = {
     "index.html", "login.html", "register.html", "admin.html", "retailer.html",
     "dashboard.html", "dashboard.css", "dashboard.js",
     "styles.css", "app.js", "home-services.js", "manifest.json", "sw.js", "icon.svg",
-    "icon-192.png", "icon-512.png",
+    "icon-192.png", "icon-512.png", "assistant.css", "public-assistant.js", "portal-assistant.js",
 }
 APPLICATIONS_KEY = "rm-demo-applications"
 MASTER_ONLY_KEYS = STATE_KEYS - {
@@ -166,7 +176,27 @@ def document_storage_dir() -> Path:
         if storage_path != mount_path and mount_path not in storage_path.parents:
             raise RuntimeError("UPLOAD_STORAGE_DIR must be inside the Railway persistent volume mount.")
         return storage_path
-    return Path(configured_path or BASE_DIR / "private_documents").resolve()
+    return resolve_writable_storage(Path(configured_path or BASE_DIR / "private_documents").resolve())
+
+
+_STORAGE_FALLBACKS: dict[Path, Path] = {}
+
+
+def resolve_writable_storage(preferred: Path) -> Path:
+    """Use the configured folder, or a local fallback when the host denies access (e.g. /var/data on Render)."""
+    if preferred in _STORAGE_FALLBACKS:
+        return _STORAGE_FALLBACKS[preferred]
+    try:
+        preferred.mkdir(mode=0o700, parents=True, exist_ok=True)
+        chosen = preferred
+    except OSError:
+        chosen = (BASE_DIR / "private_documents").resolve()
+        LOGGER.warning(
+            "Cannot create %s; using %s instead. Files there are lost on redeploy unless a persistent disk is attached.",
+            preferred, chosen,
+        )
+    _STORAGE_FALLBACKS[preferred] = chosen
+    return chosen
 
 
 class Base(DeclarativeBase):
@@ -597,6 +627,11 @@ def password_policy(password: str) -> None:
         raise HTTPException(status_code=422, detail="Use upper/lowercase letters, a number, and a symbol.")
 
 
+PENDING_APPLICATION_MESSAGE = (
+    "Aapka application abhi review ya pending mein hai. Approval ke baad hi aap login kar payenge."
+)
+
+
 def normalized_identifier(identifier: str) -> str:
     value = identifier.strip()
     return value.upper() if any(character.isalpha() for character in value) else value
@@ -795,11 +830,19 @@ def purge_application_documents(db: Session, application_id: str) -> int:
 
 def run_document_purge() -> int:
     retention = positive_integer_setting("KYC_RETENTION_DAYS", KYC_RETENTION_DAYS, 1, KYC_RETENTION_DAYS)
-    cutoff = utc_now() - timedelta(days=retention)
+    pending_retention = positive_integer_setting(
+        "KYC_PENDING_RETENTION_DAYS", PENDING_KYC_RETENTION_DAYS, retention, 90)
+    now = utc_now()
     with SessionLocal() as db:
-        expired = list(db.scalars(select(CustomerDocument).where(
-            CustomerDocument.purged_at.is_(None), CustomerDocument.uploaded_at < cutoff,
-        )))
+        # Documents under active review are kept longer so they are not deleted before a decision is made.
+        expired = list(db.scalars(
+            select(CustomerDocument).join(Application, Application.id == CustomerDocument.application_id).where(
+                CustomerDocument.purged_at.is_(None),
+                (
+                    (CustomerDocument.uploaded_at < now - timedelta(days=retention))
+                    & Application.status.not_in(REVIEW_IN_PROGRESS_STATUSES)
+                ) | (CustomerDocument.uploaded_at < now - timedelta(days=pending_retention)),
+            )))
         count = purge_customer_documents(db, expired)
         db.commit()
     if count:
@@ -873,7 +916,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     storage_dir = document_storage_dir()
     storage_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if system() != "Windows":
-        storage_dir.chmod(0o700)
+        try:
+            storage_dir.chmod(0o700)
+        except OSError:
+            LOGGER.warning("Could not restrict permissions on %s", storage_dir)
     Base.metadata.create_all(engine)
     ensure_schema_columns()
     with SessionLocal() as db:
@@ -961,6 +1007,12 @@ def auth_lookup(body: AuthInput, request: Request, db: Session = Depends(get_db)
         ))
         if pending and body.name.strip() and body.name.strip().casefold() == pending.name.strip().casefold():
             return {"step": "staff_setup", "identifier": identifier}
+        waiting = db.scalar(select(Application).where(
+            (Application.mobile == identifier) | (Application.id == identifier),
+            Application.status == "pending",
+        ))
+        if waiting:
+            return {"step": "pending", "identifier": identifier, "message": PENDING_APPLICATION_MESSAGE}
         return generic
     if user.role == "retailer" and user.is_active and user.password_hash is None:
         return {"step": "activate", "identifier": identifier}
@@ -1553,10 +1605,19 @@ def save_applications(db: Session, proposed: list[dict[str, Any]], actor: User) 
         if row.status in KYC_PURGE_STATUSES and row.status != previous_status:
             purge_application_documents(db, app_id)
             old = dict(row.payload)
+        if row.status in {"blocked", "rejected", "suspended"} and row.status != previous_status:
+            deactivate_partner_account(db, row.mobile)
         if row.status == "approved":
             setup_codes.extend(sync_approved_account(db, old))
     validate_all_distributor_pins(db)
     return setup_codes
+
+
+def deactivate_partner_account(db: Session, mobile: str) -> None:
+    account = db.scalar(select(User).where(User.mobile == mobile, User.role.in_(("retailer", "distributor"))))
+    if account:
+        account.is_active = False
+        db.query(PortalSession).filter(PortalSession.user_id == account.id).delete()
 
 
 def ensure_unique_distributor_pins(db: Session, applicant: dict[str, Any]) -> None:
@@ -1773,6 +1834,22 @@ def admin_document_submissions(
     return sorted(submissions, key=lambda item: item["submittedAt"], reverse=True)
 
 
+def preview_response(contents: bytes, content_type: str, filename: str) -> StreamingResponse:
+    """Show the document inline in the browser tab instead of downloading it to the viewer's computer."""
+    safe_filename = sanitize_filename(filename)
+    policy = "default-src 'none'; img-src 'self'" if content_type == "application/pdf" else "sandbox"
+    return StreamingResponse(
+        BytesIO(contents),
+        media_type=content_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": policy,
+            "Content-Disposition": "inline; filename=\"" + safe_filename + "\"",
+        },
+    )
+
+
 @app.get("/api/admin/applications/{application_id}/documents/{document_id}")
 def download_customer_document(
     application_id: str,
@@ -1795,17 +1872,7 @@ def download_customer_document(
     except InvalidToken as error:
         LOGGER.exception("Customer document integrity check failed for document %s", document.id)
         raise HTTPException(status_code=500, detail="The requested customer document could not be verified.") from error
-    safe_filename = sanitize_filename(document.original_filename)
-    return StreamingResponse(
-        BytesIO(contents),
-        media_type=document.content_type,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "sandbox",
-            "Content-Disposition": "attachment; filename=\"" + safe_filename + "\"",
-        },
-    )
+    return preview_response(contents, document.content_type, document.original_filename)
 
 
 @app.get("/api/admin/transactions/{transaction_id}/documents/{document_id}")
@@ -1828,17 +1895,7 @@ def download_transaction_document(
     except InvalidToken as error:
         LOGGER.exception("Transaction document integrity check failed for document %s", document.id)
         raise HTTPException(status_code=500, detail="The requested transaction document could not be verified.") from error
-    safe_filename = sanitize_filename(document.original_filename)
-    return StreamingResponse(
-        BytesIO(contents),
-        media_type=document.content_type,
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "sandbox",
-            "Content-Disposition": "attachment; filename=\"" + safe_filename + "\"",
-        },
-    )
+    return preview_response(contents, document.content_type, document.original_filename)
 
 
 @app.put("/api/portal/state/{key}")
@@ -2392,8 +2449,26 @@ def partner_action(
     db.commit()
     return {
         "status": row.status, "partnerId": row.payload.get("generatedId", ""),
-        "setupCodes": setup_codes if user.role in STAFF_ROLES else [],
+        "setupCodes": setup_codes if user.role == "master" else [],
     }
+
+
+@app.post("/api/owner/partners/{application_id}/setup-code")
+def owner_issue_partner_setup_code(
+    application_id: str, owner: User = Depends(role_required("master")), db: Session = Depends(get_db),
+) -> dict[str, str]:
+    """Only the owner can mint a first-login code; staff who approved a partner never see it."""
+    row = db.get(Application, application_id)
+    account = db.get(User, row.payload.get("accountUserId", "")) if row and row.status == "approved" else None
+    if not account or account.role not in {"retailer", "distributor"}:
+        raise HTTPException(status_code=404, detail="No approved partner account found for this application.")
+    if account.password_hash:
+        raise HTTPException(status_code=409, detail="This partner has already set a password.")
+    account.setup_token_hash = account.setup_token_expires_at = None
+    code = issue_setup_token(account)
+    record_audit(db, owner, "partner_setup_code", row.id, {"role": account.role})
+    db.commit()
+    return {"identifier": account.retail_id or account.mobile, "mobile": account.mobile, "code": code or ""}
 
 
 @app.post("/api/admin/retailers/{application_id}/reassign")
@@ -2639,14 +2714,336 @@ class AssistantChatRequest(BaseModel):
     message: str = Field(max_length=2000)
 
 
+class PublicAssistantRequest(InputModel):
+    message: str = Field(max_length=1000)
+
+
+def load_ai_settings(db: Session) -> tuple[dict[str, Any], dict[str, Any]]:
+    row = db.get(PortalRecord, AI_CONFIG_KEY)
+    envelope = row.value if row and isinstance(row.value, dict) else {}
+    version = envelope.get("version")
+    meta = {
+        "version": version if isinstance(version, int) else 0,
+        "updatedAt": str(envelope.get("updatedAt", "")),
+        "updatedBy": str(envelope.get("updatedBy", "")),
+    }
+    return safe_ai_config(envelope.get("config")), meta
+
+
+def save_ai_config(db: Session, owner: User, config: dict[str, Any], action: str) -> dict[str, Any]:
+    _, meta = load_ai_settings(db)
+    envelope = {
+        "config": config, "version": meta["version"] + 1,
+        "updatedAt": utc_now().isoformat(), "updatedBy": owner.name,
+    }
+    row = db.get(PortalRecord, AI_CONFIG_KEY)
+    if row is None:
+        db.add(PortalRecord(key=AI_CONFIG_KEY, value=envelope))
+    else:
+        row.value = envelope
+        row.updated_at = utc_now()
+    record_audit(db, owner, action, AI_CONFIG_KEY, {"version": envelope["version"]})
+    db.commit()
+    return {"config": config, "meta": {k: envelope[k] for k in ("version", "updatedAt", "updatedBy")}}
+
+
+def log_ai_event(
+    db: Session, config: dict[str, Any], channel: str, actor_id: str, actor_role: str,
+    message: str, reply: str, outcome: str,
+) -> None:
+    if not config["logConversations"] or outcome in {"empty", "disabled", "rate_limited"}:
+        return
+    try:
+        db.add(AuditLog(
+            actor_id=actor_id, actor_role=actor_role, action=AI_LOG_ACTIONS[channel], target=channel,
+            detail={"question": redact_for_log(message), "reply": reply[:300], "outcome": outcome},
+            created_at=utc_now(),
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        LOGGER.exception("The assistant conversation could not be logged")
+
+
+@app.get("/api/public/assistant/config")
+def public_assistant_settings(db: Session = Depends(get_db)) -> dict[str, Any]:
+    section = load_ai_settings(db)[0]["public"]
+    return {"enabled": section["enabled"], "greeting": section["greeting"]}
+
+
+@app.post("/api/public/assistant/chat")
+def public_assistant_chat(
+    payload: PublicAssistantRequest, request: Request, db: Session = Depends(get_db),
+) -> JSONResponse:
+    config = load_ai_settings(db)[0]
+    remote = request.client.host if request.client else "unknown"
+    body, status, outcome, message = run_chat(
+        "public", payload.message, config, limiter=PUBLIC_ASSISTANT_LIMITER, rate_key=remote,
+    )
+    log_ai_event(db, config, "public", "public", "visitor", message, body["reply"], outcome)
+    return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
+
+
 @app.post("/assistant/chat")
-def assistant_chat(payload: AssistantChatRequest, request: Request, user: User = Depends(current_user)):
+def assistant_chat(
+    payload: AssistantChatRequest, request: Request,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
     check_origin(request)
     session_cookie = request.cookies.get(COOKIE_NAME, "")
     if not compare_digest(request.headers.get("x-csrf-token", ""), csrf_token_for(session_cookie)):
         raise HTTPException(status_code=403, detail="A valid CSRF token is required.")
-    body, status = handle_chat(payload.message, user.id, ASSISTANT_LIMITER, str(user.id))
+    config = load_ai_settings(db)[0]
+    body, status, outcome, message = run_chat(
+        "portal", payload.message, config, limiter=ASSISTANT_LIMITER, rate_key=str(user.id), role=user.role,
+    )
+    log_ai_event(db, config, "portal", user.id, user.role, message, body["reply"], outcome)
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------
+# Supreme Owner console: every page, asset and API below requires the "master" role.
+# ---------------------------------------------------------------------------
+owner_only = role_required("master")
+OWNER_PAGE_HEADERS = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"}
+
+
+def owner_console_file(request: Request, db: Session, filename: str) -> FileResponse | RedirectResponse:
+    try:
+        user = current_user(request, db)
+    except HTTPException:
+        return RedirectResponse("/login.html", status_code=303, headers=OWNER_PAGE_HEADERS)
+    if user.role != "master":
+        raise HTTPException(status_code=404, detail="Not found.")
+    return FileResponse(OWNER_CONSOLE_DIR / filename, headers=OWNER_PAGE_HEADERS)
+
+
+@app.get("/supreme-owner", include_in_schema=False)
+def supreme_owner_page(request: Request, db: Session = Depends(get_db)):
+    return owner_console_file(request, db, "owner.html")
+
+
+@app.get("/supreme-owner/assets/{asset_name}", include_in_schema=False)
+def supreme_owner_asset(asset_name: str, request: Request, db: Session = Depends(get_db)):
+    if asset_name not in OWNER_CONSOLE_ASSETS:
+        raise HTTPException(status_code=404, detail="Not found.")
+    return owner_console_file(request, db, asset_name)
+
+
+class OwnerPasswordInput(InputModel):
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AiConfigInput(InputModel):
+    config: dict[str, Any]
+
+
+class AiTestInput(InputModel):
+    channel: str = Field(pattern=r"^(public|portal)$")
+    role: str = Field(default="retailer", pattern=r"^(retailer|distributor|subadmin|masteradmin|master)$")
+    message: str = Field(max_length=1000)
+    config: dict[str, Any] | None = None
+
+
+def grouped_counts(db: Session, column: Any) -> dict[str, int]:
+    return {str(key): count for key, count in db.execute(select(column, func.count()).group_by(column)).all()}
+
+
+def count_rows(db: Session, model: Any) -> int:
+    return db.scalar(select(func.count()).select_from(model)) or 0
+
+
+@app.get("/api/supreme/overview")
+def supreme_overview(_: User = Depends(owner_only), db: Session = Depends(get_db)) -> dict[str, Any]:
+    config, meta = load_ai_settings(db)
+    now = utc_now()
+    return {
+        "users": grouped_counts(db, User.role),
+        "applications": grouped_counts(db, Application.status),
+        "staff": grouped_counts(db, StaffAuthorization.status),
+        "activeSessions": db.scalar(
+            select(func.count()).select_from(PortalSession).where(PortalSession.expires_at > now)) or 0,
+        "auditEntries": count_rows(db, AuditLog),
+        "ai": {
+            "publicEnabled": config["public"]["enabled"], "portalEnabled": config["portal"]["enabled"],
+            "configVersion": meta["version"],
+        },
+        "serverTime": now.isoformat(),
+    }
+
+
+@app.get("/api/supreme/logs")
+def supreme_logs(
+    limit: int = Query(default=50, ge=1, le=200),
+    action: str = Query(default="", max_length=40),
+    beforeId: int = Query(default=0, ge=0),
+    _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    query = select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+    if action:
+        query = query.where(AuditLog.action == action)
+    if beforeId:
+        query = query.where(AuditLog.id < beforeId)
+    rows = list(db.scalars(query))
+    return {
+        "entries": [
+            {
+                "id": row.id, "actorId": row.actor_id, "actorRole": row.actor_role, "action": row.action,
+                "target": row.target, "detail": row.detail, "createdAt": row.created_at.isoformat(),
+            }
+            for row in rows
+        ],
+        "actions": list(db.scalars(select(AuditLog.action).distinct().order_by(AuditLog.action))),
+        "nextBeforeId": rows[-1].id if len(rows) == limit else 0,
+    }
+
+
+@app.get("/api/supreme/security")
+def supreme_security(_: User = Depends(owner_only), db: Session = Depends(get_db)) -> dict[str, Any]:
+    now = utc_now()
+    owner_account = db.scalar(select(User).where(User.role == "master"))
+    return {
+        "sessionLifetimeHours": int(SESSION_LIFETIME.total_seconds() // 3600),
+        "loginFailureLimit": LOGIN_FAILURE_LIMIT,
+        "lockoutMinutes": int(LOGIN_LOCK_TIME.total_seconds() // 60),
+        "secureCookies": COOKIE_SECURE,
+        "kycRetentionDays": KYC_RETENTION_DAYS,
+        "twoFactorRoles": sorted(MFA_LOGIN_ROLES),
+        "dedicatedCsrfSecret": bool(os.getenv("CSRF_SECRET")),
+        "bootstrapTokenConfigured": bool(os.getenv("RM_MASTER_BOOTSTRAP_TOKEN")),
+        "ownerSetupComplete": bool(owner_account and owner_account.password_hash),
+        "activeSessions": db.scalar(
+            select(func.count()).select_from(PortalSession).where(PortalSession.expires_at > now)) or 0,
+        "activeLockouts": db.scalar(
+            select(func.count()).select_from(LoginAttempt).where(LoginAttempt.locked_until > now)) or 0,
+        "staffWithoutTwoFactor": db.scalar(
+            select(func.count()).select_from(User).where(
+                User.role.in_(sorted(TWO_FACTOR_ROLES)), User.is_active.is_(True), User.totp_enrolled.is_(False))) or 0,
+    }
+
+
+@app.post("/api/supreme/security/revoke-sessions")
+def supreme_revoke_sessions(
+    body: OwnerPasswordInput, request: Request,
+    owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, int]:
+    key = throttle_key(request, "owner-reauth", owner.id)
+    throttle_check(db, key)
+    if not verify_secret(body.password, owner.password_hash):
+        throttle_fail(db, key)
+        raise HTTPException(status_code=401, detail="Password verification failed.")
+    throttle_clear(db, key)
+    current_hash = sha256(request.cookies.get(COOKIE_NAME, "").encode()).hexdigest()
+    revoked = db.query(PortalSession).filter(PortalSession.token_hash != current_hash).delete()
+    record_audit(db, owner, "sessions_revoke_all", "all", {"revoked": revoked})
+    db.commit()
+    return {"revoked": revoked}
+
+
+@app.post("/api/supreme/security/clear-lockouts")
+def supreme_clear_lockouts(
+    owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, int]:
+    cleared = db.query(LoginAttempt).delete()
+    record_audit(db, owner, "lockouts_clear", "all", {"cleared": cleared})
+    db.commit()
+    return {"cleared": cleared}
+
+
+@app.post("/api/supreme/staff/{staff_id}/sign-out")
+def supreme_staff_sign_out(
+    staff_id: str, owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, int]:
+    item = db.get(StaffAuthorization, staff_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Staff record not found.")
+    user = db.scalar(select(User).where(User.mobile == item.mobile))
+    revoked = db.query(PortalSession).filter(PortalSession.user_id == user.id).delete() if user else 0
+    record_audit(db, owner, "staff_sign_out", item.mobile[-4:], {"role": item.role, "revoked": revoked})
+    db.commit()
+    return {"revoked": revoked}
+
+
+@app.get("/api/supreme/database")
+def supreme_database(_: User = Depends(owner_only), db: Session = Depends(get_db)) -> dict[str, Any]:
+    db.execute(select(1))
+    models = (
+        User, StaffAuthorization, SiteSetting, PortalRecord, Application, CustomerDocument,
+        AuditLog, TransactionDocument, PortalSession, LoginAttempt, TransactionRecord,
+    )
+    result: dict[str, Any] = {
+        "dialect": engine.dialect.name, "driver": engine.dialect.driver, "healthy": True,
+        "tables": {model.__tablename__: count_rows(db, model) for model in models},
+        "pool": None,
+        "note": "Database parameters are fixed at startup. Change them in the host's environment "
+                "variables and redeploy.",
+    }
+    if not DB_URL.startswith("sqlite"):
+        result["pool"] = {
+            "DB_POOL_SIZE": positive_integer_setting("DB_POOL_SIZE", 5, 1, 50),
+            "DB_MAX_OVERFLOW": positive_integer_setting("DB_MAX_OVERFLOW", 5, 0, 100),
+            "DB_POOL_TIMEOUT_SECONDS": positive_integer_setting("DB_POOL_TIMEOUT_SECONDS", 30, 1, 300),
+            "DB_POOL_RECYCLE_SECONDS": positive_integer_setting("DB_POOL_RECYCLE_SECONDS", 1800, 60, 86400),
+        }
+    return result
+
+
+@app.get("/api/supreme/ai/config")
+def supreme_ai_get_config(_: User = Depends(owner_only), db: Session = Depends(get_db)) -> dict[str, Any]:
+    config, meta = load_ai_settings(db)
+    return {"config": config, "meta": meta}
+
+
+@app.put("/api/supreme/ai/config")
+def supreme_ai_put_config(
+    body: AiConfigInput, owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        config = normalize_ai_config(body.config)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return save_ai_config(db, owner, config, "ai_config_update")
+
+
+@app.post("/api/supreme/ai/config/reset")
+def supreme_ai_reset_config(
+    owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return save_ai_config(db, owner, default_ai_config(), "ai_config_reset")
+
+
+@app.get("/api/supreme/ai/conversations")
+def supreme_ai_conversations(
+    channel: str = Query(default="", pattern=r"^(public|portal)?$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    actions = [AI_LOG_ACTIONS[channel]] if channel else list(AI_LOG_ACTIONS.values())
+    rows = db.scalars(
+        select(AuditLog).where(AuditLog.action.in_(actions)).order_by(AuditLog.id.desc()).limit(limit))
+    return [
+        {
+            "id": row.id, "channel": row.target, "role": row.actor_role,
+            "question": row.detail.get("question", ""), "reply": row.detail.get("reply", ""),
+            "outcome": row.detail.get("outcome", ""), "createdAt": row.created_at.isoformat(),
+        }
+        for row in rows
+    ]
+
+
+@app.post("/api/supreme/ai/test")
+def supreme_ai_test(
+    body: AiTestInput, _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, str]:
+    if body.config is not None:
+        try:
+            config = normalize_ai_config(body.config)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+    else:
+        config = load_ai_settings(db)[0]
+    reply, _status, outcome, _message = run_chat(body.channel, body.message, config, role=body.role)
+    return {"reply": reply["reply"], "outcome": outcome}
 
 
 @app.get("/{file_path:path}", include_in_schema=False)

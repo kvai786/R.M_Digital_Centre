@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: rm-digital-centre
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn ocr_server:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: CSRF_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: DOCUMENT_ENCRYPTION_KEY
+        sync: false
+      - key: RM_MASTER_BOOTSTRAP_TOKEN
+        sync: false
+      - key: MASTER_ADMIN_MOBILE
+        sync: false

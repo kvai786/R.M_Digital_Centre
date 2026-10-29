@@ -1,0 +1,154 @@
+:root {
+    --oc-bg: #070b14;
+    --oc-panel: #0f172a;
+    --oc-panel-2: #162033;
+    --oc-line: #24324b;
+    --oc-text: #e2e8f0;
+    --oc-muted: #94a3b8;
+    --oc-gold: #e7b94f;
+    --oc-cyan: #22d3ee;
+    --oc-danger: #f43f5e;
+    --oc-ok: #34d399;
+    --oc-warn: #fbbf24;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--oc-bg);
+    color: var(--oc-text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.skip-link { position: absolute; left: -999px; top: 0; padding: 8px 12px; background: var(--oc-gold); color: #000; z-index: 100; }
+.skip-link:focus { left: 8px; }
+
+h1 { margin: 0 0 12px; font-size: 24px; }
+h2 { margin: 16px 0 8px; font-size: 17px; color: var(--oc-gold); }
+
+.oc-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 24px;
+    background: linear-gradient(90deg, #0b1220, #1a1405);
+    border-bottom: 1px solid var(--oc-gold);
+}
+
+.oc-brand { display: flex; align-items: center; gap: 12px; }
+.oc-brand strong { display: block; }
+.oc-brand span { display: block; color: var(--oc-gold); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; }
+.oc-top-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.oc-chip { padding: 4px 12px; border: 1px solid var(--oc-line); border-radius: 999px; color: var(--oc-muted); font-size: 13px; }
+
+.oc-btn {
+    padding: 8px 16px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: var(--oc-gold);
+    color: #1a1405;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.oc-btn.ghost { background: transparent; border-color: var(--oc-line); color: var(--oc-text); }
+.oc-btn.danger { background: transparent; border-color: var(--oc-danger); color: #fda4af; }
+.oc-btn.small { padding: 4px 10px; font-size: 13px; }
+.oc-btn[disabled] { opacity: 0.55; cursor: not-allowed; }
+.oc-btn:focus-visible, .oc-tabs button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--oc-cyan); outline-offset: 2px; }
+
+.oc-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 10px 24px;
+    background: #1e293b;
+    border-bottom: 1px solid var(--oc-cyan);
+}
+
+.oc-banner[hidden] { display: none; }
+
+.oc-tabs, .oc-subtabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 24px; background: var(--oc-panel); border-bottom: 1px solid var(--oc-line); }
+.oc-subtabs { padding: 0; margin: 12px 0; background: transparent; }
+
+.oc-tabs button, .oc-subtabs button {
+    padding: 12px 16px;
+    border: 0;
+    border-bottom: 3px solid transparent;
+    background: transparent;
+    color: var(--oc-muted);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.oc-tabs button[aria-selected="true"], .oc-subtabs button[aria-selected="true"] { color: var(--oc-gold); border-bottom-color: var(--oc-gold); }
+
+.oc-main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+.oc-hint { color: var(--oc-muted); margin: 4px 0 12px; }
+
+.oc-status { padding: 10px 14px; border-radius: 8px; background: #052e1c; border: 1px solid var(--oc-ok); }
+.oc-status.error { background: #3b0a16; border-color: var(--oc-danger); }
+.oc-status[hidden] { display: none; }
+
+.oc-card { padding: 16px; margin: 0 0 16px; background: var(--oc-panel); border: 1px solid var(--oc-line); border-radius: 12px; }
+.oc-card[hidden], [data-panel][hidden], [data-subpanel][hidden] { display: none; }
+.oc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; align-items: end; }
+.oc-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 0 0 12px; }
+.oc-scroll { overflow-x: auto; }
+
+.oc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.oc-stat { padding: 14px; background: var(--oc-panel); border: 1px solid var(--oc-line); border-radius: 12px; }
+.oc-stat span { display: block; color: var(--oc-muted); font-size: 13px; }
+.oc-stat strong { font-size: 26px; color: var(--oc-cyan); }
+
+label { display: block; margin: 0 0 12px; color: var(--oc-muted); font-size: 13px; font-weight: 600; }
+label input, label select, label textarea, .oc-field {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    padding: 9px 12px;
+    border: 1px solid var(--oc-line);
+    border-radius: 8px;
+    background: var(--oc-panel-2);
+    color: var(--oc-text);
+    font: inherit;
+}
+
+label textarea { resize: vertical; }
+.oc-check { display: flex; align-items: center; gap: 8px; color: var(--oc-text); font-size: 14px; }
+.oc-check input { width: auto; margin: 0; }
+
+.oc-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.oc-table th, .oc-table td { padding: 8px 10px; border-bottom: 1px solid var(--oc-line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.oc-table th { color: var(--oc-muted); font-weight: 600; }
+
+.oc-ok { color: var(--oc-ok); }
+.oc-warn { color: var(--oc-warn); }
+.oc-bad { color: var(--oc-danger); }
+
+.oc-list { display: flex; flex-direction: column; gap: 10px; }
+.oc-row { padding: 12px 14px; background: var(--oc-panel); border: 1px solid var(--oc-line); border-radius: 10px; }
+.oc-row-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.oc-row-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.oc-badge { padding: 2px 10px; border-radius: 999px; border: 1px solid var(--oc-line); color: var(--oc-muted); font-size: 12px; }
+.oc-q { color: var(--oc-text); }
+.oc-a { color: var(--oc-muted); white-space: pre-wrap; }
+
+.oc-entry { padding: 12px; margin: 0 0 12px; border: 1px solid var(--oc-line); border-radius: 10px; background: var(--oc-panel-2); }
+.oc-entry-head { display: flex; gap: 8px; align-items: end; }
+.oc-entry-head label { flex: 1; margin: 0; }
+.oc-roles { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.oc-roles .oc-check { font-size: 13px; }
+
+.oc-result { margin-top: 12px; padding: 12px; border: 1px solid var(--oc-cyan); border-radius: 10px; background: #08222b; white-space: pre-wrap; }
+.oc-result[hidden] { display: none; }
+
+@media (max-width: 640px) {
+    .oc-top, .oc-main { padding-left: 12px; padding-right: 12px; }
+    .oc-tabs { padding: 0 8px; }
+}

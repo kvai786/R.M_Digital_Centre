@@ -591,7 +591,7 @@ function initializePortalLogin() {
             name: user.name,
             role: user.role,
         }));
-        window.location.assign("admin.html");
+        window.location.assign(user.role === "master" ? "/supreme-owner" : "admin.html");
     }
 
     function showMobileStep() {
@@ -633,7 +633,12 @@ function initializePortalLogin() {
                 body: { identifier: identifier, name: document.getElementById("login-name").value.trim() },
             });
             const step = selectedAccount.step;
-            if (step === "staff_setup") {
+            if (step === "pending") {
+                const message = selectedAccount.message;
+                showMobileStep();
+                setStatus(message);
+                window.alert(message);
+            } else if (step === "staff_setup") {
                 staffSetupForm.reset();
                 showOnly(staffSetupForm);
                 document.getElementById("staff-setup-password").focus();
@@ -1183,7 +1188,7 @@ function initializeOperationsDashboard() {
                         escapeHTML(file.fileName) +
                         (file.revision ? ' · revision ' + escapeHTML(file.revision) : '') +
                         ' · ' + formatFileSize(file.size) + '</span><a class="btn quiet" href="' +
-                        escapeHTML(file.downloadUrl) + '" target="_blank" rel="noopener">View / Download Document</a></li>';
+                        escapeHTML(file.downloadUrl) + '" target="_blank" rel="noopener">Preview Document</a></li>';
                 }).join("") : '<li>No uploaded documents are available for this submission.</li>';
                 return '<article class="application-card customer-document-card"><div class="application-details">' +
                     '<span class="application-type">' + escapeHTML(recordLabel) + ' · ' +
@@ -1942,7 +1947,8 @@ function initializePartnerNetwork(staff) {
             const codes = (result.setupCodes || []).map(function (item) {
                 return item.identifier + " one-time setup code: " + item.code;
             });
-            say("Partner " + result.status + ". " + codes.join(" "));
+            say("Partner " + result.status + ". " + (codes.length ? codes.join(" ")
+                : (action === "approve" ? "The Owner issues the first-login code from the Supreme Owner console." : "")));
             await load();
         } catch (error) {
             say(error.message);

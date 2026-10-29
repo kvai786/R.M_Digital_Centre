@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "rm-digital-centre-v19";
+const CACHE_NAME = "rm-digital-centre-v20";
 const APP_SHELL = [
     "./",
     "./index.html",
@@ -11,6 +11,9 @@ const APP_SHELL = [
     "./styles.css",
     "./app.js",
     "./home-services.js",
+    "./assistant.css",
+    "./public-assistant.js",
+    "./portal-assistant.js",
     "./manifest.json",
     "./icon.svg",
     "./icon-192.png",
@@ -39,7 +42,8 @@ self.addEventListener("fetch", function (event) {
     if (event.request.method !== "GET" || new URL(event.request.url).origin !== self.location.origin) {
         return;
     }
-    if (new URL(event.request.url).pathname.startsWith("/api/")) {
+    const requestPath = new URL(event.request.url).pathname;
+    if (requestPath.startsWith("/api/") || requestPath.startsWith("/supreme-owner")) {
         return;
     }
     if (event.request.destination === "video" || event.request.headers.has("range")) {
