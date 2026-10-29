@@ -143,8 +143,133 @@
             ["Portal AI", data.ai.portalEnabled ? "On" : "Off"],
             ["AI config version", data.ai.configVersion],
         ];
-        $("ov-cards").replaceChildren(...stats.map(([label, value]) =>
-            el("div", { class: "oc-stat" }, el("span", { text: label }), el("strong", { text: String(value) }))));
+        const clickable = {
+            "Total users": "users", "Retailers": "retailer", "Distributors": "distributor",
+            "Master Admins": "masteradmin", "Sub-Admins": "subadmin",
+            "Applications": "applications", "Pending applications": "pending",
+        };
+        $("ov-cards").replaceChildren(...stats.map(([label, value]) => {
+            const category = clickable[label];
+            const card = el(category ? "button" : "div", { class: "oc-stat" + (category ? " clickable" : "") },
+                el("span", { text: label }), el("strong", { text: String(value) }));
+            if (category) {
+                card.type = "button";
+                card.addEventListener("click", () => openList(category, label));
+            }
+            return card;
+        }));
+    }
+
+    /* Modal, list view, application detail and approval */
+    function openModal(title) {
+        closeModal();
+        const body = el("div", { class: "oc-modal-body" });
+        const closeBtn = el("button", { type: "button", class: "oc-btn small ghost", text: "Close" });
+        const dialog = el("div", { class: "oc-modal", role: "dialog", "aria-modal": "true", "aria-label": title },
+            el("div", { class: "oc-modal-head" }, el("h2", { text: title }), closeBtn), body);
+        const overlay = el("div", { class: "oc-overlay", id: "oc-overlay" }, dialog);
+        closeBtn.addEventListener("click", closeModal);
+        overlay.addEventListener("click", (event) => { if (event.target === overlay) closeModal(); });
+        document.body.append(overlay);
+        closeBtn.focus();
+        return body;
+    }
+
+    function closeModal() {
+        const overlay = $("oc-overlay");
+        if (overlay) overlay.remove();
+    }
+
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeModal(); });
+
+    async function openList(category, title) {
+        const body = openModal(title);
+        body.append(el("p", { class: "oc-hint", text: "Loading..." }));
+        const data = await guarded(() => api("/api/supreme/list/" + encodeURIComponent(category)));
+        if (!data) { closeModal(); return; }
+        if (!data.rows.length) { body.replaceChildren(el("p", { class: "oc-hint", text: "No records found." })); return; }
+        const table = el("table", { class: "oc-table oc-list-table" },
+            el("thead", {}, el("tr", {}, ...["Name", "Mobile", "Service", "Submitted", "Status"].map((h) => el("th", { text: h })))));
+        const tbody = el("tbody");
+        for (const item of data.rows) {
+            const row = el("tr", item.kind === "application" ? { class: "clickable", tabindex: "0" } : {},
+                el("td", { text: item.name || "-" }), el("td", { text: item.mobile }),
+                el("td", { text: item.service || "-" }), el("td", { text: formatDate(item.submittedAt) }),
+                el("td", { text: item.status }));
+            if (item.kind === "application") {
+                const open = () => openApplication(item.id, () => openList(category, title));
+                row.addEventListener("click", open);
+                row.addEventListener("keydown", (event) => { if (event.key === "Enter") open(); });
+            }
+            tbody.append(row);
+        }
+        table.append(tbody);
+        body.replaceChildren(el("div", { class: "oc-scroll" }, table));
+    }
+
+    async function openApplication(id, back) {
+        const body = openModal("Application " + id);
+        const detail = await guarded(() => api("/api/supreme/applications/" + encodeURIComponent(id)));
+        if (!detail) { closeModal(); return; }
+        const rows = [["Status", detail.status], ["Role", detail.role], ["Mobile", detail.mobile],
+            ["Submitted", formatDate(detail.submittedAt)]];
+        for (const [key, value] of Object.entries(detail.fields)) {
+            if (!["status", "role", "mobile"].includes(key)) rows.push([key, value]);
+        }
+        const info = el("table", { class: "oc-table" });
+        fillTable(info, rows);
+        const docs = el("div", { class: "oc-row-actions" });
+        if (!detail.documents.length) docs.append(el("span", { class: "oc-hint", text: "No uploaded documents on file." }));
+        for (const doc of detail.documents) {
+            if (doc.purgedAt) {
+                docs.append(el("span", { class: "oc-chip", text: doc.label + " (deleted)" }));
+                continue;
+            }
+            docs.append(el("a", {
+                class: "oc-btn small ghost", href: doc.previewUrl, target: "_blank",
+                rel: "noopener noreferrer", text: "Preview " + doc.label,
+            }));
+        }
+        const actions = el("div", { class: "oc-row-actions" });
+        const backBtn = el("button", { type: "button", class: "oc-btn small ghost", text: "Back to list" });
+        backBtn.addEventListener("click", back);
+        actions.append(backBtn);
+        if (detail.status === "pending") {
+            const approve = el("button", { type: "button", class: "oc-btn small", text: "Approve" });
+            const reject = el("button", { type: "button", class: "oc-btn small danger", text: "Reject" });
+            approve.addEventListener("click", () => showApproveForm(detail, back, body));
+            reject.addEventListener("click", () => rejectApplication(detail, back));
+            actions.append(approve, reject);
+        }
+        body.append(info, el("h2", { text: "KYC documents (secure inline preview)" }), docs, el("div", { class: "oc-form-slot", id: "oc-form-slot" }), actions);
+    }
+
+    function showApproveForm(detail, back) {
+        const idInput = el("input", { name: "officialPortalId", maxlength: "80", autocomplete: "off", required: "" });
+        const credInput = el("input", { name: "officialCredentials", maxlength: "200", autocomplete: "off" });
+        const form = el("form", { class: "oc-card oc-grid" },
+            el("label", { text: "Official Portal ID" }, idInput),
+            el("label", { text: "Credentials / password (shown to the partner)" }, credInput),
+            el("button", { class: "oc-btn", type: "submit", text: "Confirm approval" }));
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const done = await guarded(() => api("/api/admin/partners/" + encodeURIComponent(detail.id) + "/action", {
+                method: "POST",
+                body: { action: "approve", officialPortalId: idInput.value.trim(), officialCredentials: credInput.value.trim() },
+            }));
+            if (done) { notify("Application approved and Official ID saved."); loadOverview(); back(); }
+        });
+        $("oc-form-slot").replaceChildren(form);
+        idInput.focus();
+    }
+
+    async function rejectApplication(detail, back) {
+        const reason = window.prompt("Reason for rejection:");
+        if (!reason || !reason.trim()) return;
+        const done = await guarded(() => api("/api/admin/partners/" + encodeURIComponent(detail.id) + "/action", {
+            method: "POST", body: { action: "reject", reason: reason.trim() },
+        }));
+        if (done) { notify("Application rejected."); loadOverview(); back(); }
     }
 
     /* Staff */

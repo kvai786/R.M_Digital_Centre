@@ -78,15 +78,22 @@
         document.body.append(fab, panel);
 
         function addMessage(text, who) {
-            log.append(el("div", "rm-chat-msg " + who, text));
-            log.scrollTop = log.scrollHeight;
-        }
-
-        function setOpen(open) {
-            panel.hidden = !open;
-            fab.setAttribute("aria-expanded", String(open));
-            if (open) { input.focus(); } else { fab.focus(); }
-        }
+    const msgDiv = el("div", "rm-chat-msg " + who, text);
+    
+    // Agar message Bot/AI ka hai, toh Speaker Button jod do
+    if (who === "bot") {
+        const btn = document.createElement("button");
+        btn.innerHTML = "🔊 Listen";
+        btn.className = "tts-btn";
+        btn.style.cssText = "background:none; border:none; cursor:pointer; font-size:14px; margin-left:8px; color:inherit;";
+        btn.setAttribute("data-message", text);
+        btn.onclick = function() { speakText(this); };
+        msgDiv.appendChild(btn);
+    }
+    
+    log.append(msgDiv);
+    log.scrollTop = log.scrollHeight;
+}
 
         addMessage("Namaste! How can I help you today?", "bot");
         fab.addEventListener("click", function () { setOpen(panel.hidden); });
@@ -117,3 +124,20 @@
         init();
     }
 })();
+// Text-to-Speech Speaker Function
+function speakText(button) {
+    const textToSpeak = button.getAttribute('data-message') || (button.previousElementSibling ? button.previousElementSibling.innerText : '');
+    
+    if ('speechSynthesis' in window && textToSpeak) {
+        window.speechSynthesis.cancel(); // Pehle ki koi audio chal rahi ho toh roko
+        
+        const utterance = new SpeechSynthesisUtterance(textToSpeak);
+        // Aap language yahan set kar sakte hain ('hi-IN' Hindi ke liye, 'bn-IN' Bengali ke liye)
+        utterance.lang = 'hi-IN'; 
+        utterance.rate = 1.0;
+        
+        window.speechSynthesis.speak(utterance);
+    } else {
+        alert('Browser does not support text-to-speech audio.');
+    }
+}//

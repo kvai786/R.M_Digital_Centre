@@ -450,6 +450,8 @@ class UplineRequestInput(InputModel):
 class PartnerActionInput(InputModel):
     action: str = Field(pattern=r"^(approve|reject|suspend|reactivate)$")
     reason: str = Field(default="", max_length=500)
+    officialPortalId: str = Field(default="", max_length=80)
+    officialCredentials: str = Field(default="", max_length=200)
 
 
 class ReassignInput(InputModel):
@@ -630,6 +632,9 @@ def password_policy(password: str) -> None:
 PENDING_APPLICATION_MESSAGE = (
     "Aapka application abhi review ya pending mein hai. Approval ke baad hi aap login kar payenge."
 )
+
+
+ACCESS_DENIED_MESSAGE = "User does not exist or registration not found. Access denied."
 
 
 def normalized_identifier(identifier: str) -> str:
@@ -1000,6 +1005,8 @@ def auth_lookup(body: AuthInput, request: Request, db: Session = Depends(get_db)
     user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
     if user is None and identifier == MASTER_ADMIN_MOBILE and not db.scalar(select(User).where(User.role == "master")):
         return {"step": "bootstrap", "identifier": identifier}
+    if user is not None and not user.is_active:
+        raise HTTPException(status_code=403, detail=ACCESS_DENIED_MESSAGE)
     if user is None:
         pending = db.scalar(select(StaffAuthorization).where(
             StaffAuthorization.mobile == identifier,
@@ -1013,7 +1020,7 @@ def auth_lookup(body: AuthInput, request: Request, db: Session = Depends(get_db)
         ))
         if waiting:
             return {"step": "pending", "identifier": identifier, "message": PENDING_APPLICATION_MESSAGE}
-        return generic
+        raise HTTPException(status_code=403, detail=ACCESS_DENIED_MESSAGE)
     if user.role == "retailer" and user.is_active and user.password_hash is None:
         return {"step": "activate", "identifier": identifier}
     if user.role == "distributor" and user.is_active and user.password_hash is None:
@@ -2291,7 +2298,14 @@ def retailer_profile(
         row = db.get(Application, own.distributor_application_id)
         if row:
             distributor = distributor_card(row.payload)
-    return {"profile": session_user_data(user), "distributor": distributor, "helpline": get_helpline(db)}
+    official = {
+        "portalId": own.payload.get("officialPortalId", ""),
+        "credentials": own.payload.get("officialCredentials", ""),
+    } if own and own.status == "approved" else None
+    return {
+        "profile": session_user_data(user), "distributor": distributor, "helpline": get_helpline(db),
+        "officialPortal": official,
+    }
 
 
 @app.get("/api/distributor/retailers")
@@ -2413,6 +2427,9 @@ def partner_action(
     if body.action == "approve":
         if row.role == "distributor":
             ensure_unique_distributor_pins(db, payload)
+        if body.officialPortalId.strip():
+            payload["officialPortalId"] = body.officialPortalId.strip()
+            payload["officialCredentials"] = body.officialCredentials.strip()
         payload.update({
             "status": "approved", "approvedBy": user.name, "approvedAt": utc_now().isoformat(),
             "generatedId": str(payload.get("generatedId") or next_partner_id(db, row.role)),
@@ -2869,6 +2886,61 @@ def supreme_overview(_: User = Depends(owner_only), db: Session = Depends(get_db
             "configVersion": meta["version"],
         },
         "serverTime": now.isoformat(),
+    }
+
+
+LIST_ROLE_CATEGORIES = {"retailer", "distributor", "masteradmin", "subadmin"}
+
+
+@app.get("/api/supreme/list/{category}")
+def supreme_list(
+    category: str, _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if category in {"applications", "pending"}:
+        query = select(Application).order_by(Application.submitted_at.desc())
+        if category == "pending":
+            query = query.where(Application.status == "pending")
+        rows = [{
+            "id": item.id, "kind": "application", "name": item.payload.get("name", ""), "mobile": item.mobile,
+            "service": (item.payload.get("business") or item.role.title()),
+            "submittedAt": item.submitted_at.isoformat(), "status": item.status,
+        } for item in db.scalars(query)]
+    elif category == "users" or category in LIST_ROLE_CATEGORIES:
+        query = select(User).order_by(User.created_at.desc())
+        if category != "users":
+            query = query.where(User.role == category)
+        rows = [{
+            "id": item.id, "kind": "user", "name": item.name, "mobile": item.mobile,
+            "service": item.role, "submittedAt": item.created_at.isoformat(),
+            "status": "active" if item.is_active else "blocked",
+        } for item in db.scalars(query)]
+    else:
+        raise HTTPException(status_code=404, detail="Unknown list category.")
+    return {"category": category, "rows": rows}
+
+
+@app.get("/api/supreme/applications/{application_id}")
+def supreme_application_detail(
+    application_id: str, _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.get(Application, application_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Application not found.")
+    fields = {
+        key: value for key, value in row.payload.items()
+        if isinstance(value, (str, int, float, bool)) and len(str(value)) <= 300
+        and key not in {"officialCredentials"}
+    }
+    documents = db.scalars(select(CustomerDocument).where(
+        CustomerDocument.application_id == row.id).order_by(CustomerDocument.uploaded_at.desc()))
+    return {
+        "id": row.id, "role": row.role, "status": row.status, "mobile": row.mobile,
+        "submittedAt": row.submitted_at.isoformat(), "fields": fields,
+        "officialPortalId": row.payload.get("officialPortalId", ""),
+        "documents": [{
+            **document_public_data(item),
+            "previewUrl": "/api/admin/applications/" + row.id + "/documents/" + item.id,
+        } for item in documents],
     }
 
 

@@ -2099,6 +2099,12 @@ function initializeRetailerDashboard() {
     document.getElementById("retailer-profile-name").textContent = profile.name;
     document.getElementById("retailer-profile-mobile").textContent = profile.mobile;
     document.getElementById("retailer-profile-email").textContent = profile.email || "Not configured";
+    const official = PORTAL_RETAILER.officialPortal;
+    if (official && official.portalId) {
+        document.getElementById("official-portal-card").hidden = false;
+        document.getElementById("official-portal-id").textContent = official.portalId;
+        document.getElementById("official-portal-credentials").textContent = official.credentials || "—";
+    }
     const distributor = PORTAL_RETAILER.distributor;
     if (distributor) {
         document.getElementById("assigned-distributor-card").hidden = false;
