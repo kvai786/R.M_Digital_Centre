@@ -1,0 +1,14 @@
+{
+  "appId": "in.rmdigitalcentre.portal",
+  "appName": "R.M Digital Centre",
+  "webDir": "www",
+  "server": {
+    "url": "https://CHANGE-ME.example.com",
+    "cleartext": false,
+    "allowNavigation": ["CHANGE-ME.example.com"]
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

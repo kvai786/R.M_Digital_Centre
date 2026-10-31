@@ -42,6 +42,7 @@ from assistant_control import (
     redact_for_log, run_chat, safe_config as safe_ai_config,
 )
 from assistant_triage import RateLimiter
+from brand_documents import VIEWER_CSP, is_watermarkable, watermark_viewer_html
 
 ASSISTANT_LIMITER = RateLimiter(limit=15, window_seconds=60)
 PUBLIC_ASSISTANT_LIMITER = RateLimiter(limit=10, window_seconds=60)
@@ -140,6 +141,8 @@ STATIC_FILES = {
     "styles.css", "app.js", "home-services.js", "manifest.json", "sw.js", "icon.svg",
     "icon-192.png", "icon-512.png", "assistant.css", "public-assistant.js", "portal-assistant.js",
         "rm-voice.js", "track.html", "track.js", "commission.html", "commission.js",
+    "compliance.html", "compliance.js", "credentials.json", "terms.html", "privacy.html", "refund.html",
+    "rm-theme.css", "rm-particles.js",
     }
 APPLICATIONS_KEY = "rm-demo-applications"
 MASTER_ONLY_KEYS = STATE_KEYS - {
@@ -337,6 +340,24 @@ class TransactionDocument(Base):
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+BUSINESS_DOCUMENT_TYPES = {
+    "csc": "CSC", "tec": "TEC", "ezeepay": "EzeePay", "spice_money": "Spice Money", "udyam": "Udyam",
+}
+
+
+class BusinessDocument(Base):
+    __tablename__ = "business_documents"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    doc_type: Mapped[str] = mapped_column(String(20), index=True)
+    original_filename: Mapped[str] = mapped_column(String(180))
+    content_type: Mapped[str] = mapped_column(String(40))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256_hex: Mapped[str] = mapped_column(String(64))
+    storage_key: Mapped[str] = mapped_column(String(80), unique=True)
+    uploaded_by: Mapped[str] = mapped_column(String(36))
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class PortalSession(Base):
     __tablename__ = "portal_sessions"
     token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -472,6 +493,7 @@ class StaffActionInput(InputModel):
 class UnlockInput(InputModel):
     identifier: str = Field(min_length=4, max_length=20)
     ip: str = Field(default="", max_length=45, pattern=r"^[0-9A-Fa-f:.]*$")
+    group: str = Field(default="", pattern=r"^(admin|partner)?$")
 
 
 class HelplineInput(InputModel):
@@ -2200,6 +2222,17 @@ def admin_document_submissions(
 def preview_response(contents: bytes, content_type: str, filename: str) -> StreamingResponse:
     """Show the document inline in the browser tab instead of downloading it to the viewer's computer."""
     safe_filename = sanitize_filename(filename)
+    if is_watermarkable(content_type):
+        return StreamingResponse(
+            BytesIO(watermark_viewer_html(contents, content_type, safe_filename)),
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": VIEWER_CSP,
+                "Content-Disposition": "inline",
+            },
+        )
     policy = "default-src 'none'; img-src 'self'" if content_type == "application/pdf" else "sandbox"
     return StreamingResponse(
         BytesIO(contents),
@@ -2259,6 +2292,98 @@ def download_transaction_document(
         LOGGER.exception("Transaction document integrity check failed for document %s", document.id)
         raise HTTPException(status_code=500, detail="The requested transaction document could not be verified.") from error
     return preview_response(contents, document.content_type, document.original_filename)
+
+
+def business_document_public_data(document: BusinessDocument) -> dict[str, Any]:
+    return {
+        "id": document.id,
+        "docType": document.doc_type,
+        "label": BUSINESS_DOCUMENT_TYPES.get(document.doc_type, document.doc_type),
+        "fileName": document.original_filename,
+        "size": document.size_bytes,
+        "type": document.content_type,
+        "uploadedAt": document.uploaded_at.isoformat(),
+        "viewUrl": "/api/supreme/documents/" + document.id,
+    }
+
+
+@app.post("/api/supreme/upload-document")
+async def upload_business_document(
+    doc_type: str = Form(...),
+    file: UploadFile = File(...),
+    owner: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    doc_type = doc_type.strip().lower()
+    if doc_type not in BUSINESS_DOCUMENT_TYPES:
+        raise HTTPException(status_code=400, detail="Choose a valid document type: " + ", ".join(BUSINESS_DOCUMENT_TYPES) + ".")
+    contents, content_type, filename = await read_validated_document(file)
+    fernet = document_fernet()
+    storage_key, saved_path = await run_in_threadpool(persist_document, document_storage_dir(), contents, fernet)
+    try:
+        document = BusinessDocument(
+            doc_type=doc_type, original_filename=filename, content_type=content_type,
+            size_bytes=len(contents), sha256_hex=sha256(contents).hexdigest(),
+            storage_key=storage_key, uploaded_by=owner.id, uploaded_at=utc_now(),
+        )
+        db.add(document)
+        record_audit(db, owner, "business_document_upload", doc_type, {"sha256": document.sha256_hex})
+        db.commit()
+    except Exception:
+        db.rollback()
+        saved_path.unlink(missing_ok=True)
+        LOGGER.exception("Business document upload failed")
+        raise HTTPException(status_code=500, detail="The document could not be saved.")
+    return {"success": True, "message": BUSINESS_DOCUMENT_TYPES[doc_type] + " document uploaded successfully.",
+            "document": business_document_public_data(document)}
+
+
+@app.get("/api/supreme/documents")
+def list_business_documents(
+    _: User = Depends(role_required("master")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    rows = db.scalars(select(BusinessDocument).order_by(BusinessDocument.uploaded_at.desc())).all()
+    return {"documents": [business_document_public_data(row) for row in rows]}
+
+
+@app.get("/api/supreme/documents/{document_id}")
+def view_business_document(
+    document_id: str,
+    _: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    document = db.get(BusinessDocument, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="The requested document was not found.")
+    storage_dir = document_storage_dir()
+    path = (storage_dir / document.storage_key).resolve()
+    if path.parent != storage_dir or not path.is_file():
+        raise HTTPException(status_code=404, detail="The requested document is unavailable.")
+    try:
+        contents = document_fernet().decrypt(path.read_bytes())
+    except InvalidToken as error:
+        LOGGER.exception("Business document integrity check failed for document %s", document.id)
+        raise HTTPException(status_code=500, detail="The requested document could not be verified.") from error
+    return preview_response(contents, document.content_type, document.original_filename)
+
+
+@app.delete("/api/supreme/documents/{document_id}")
+def delete_business_document(
+    document_id: str,
+    owner: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    document = db.get(BusinessDocument, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="The requested document was not found.")
+    storage_dir = document_storage_dir()
+    path = (storage_dir / document.storage_key).resolve()
+    record_audit(db, owner, "business_document_delete", document.doc_type, {"sha256": document.sha256_hex})
+    db.delete(document)
+    db.commit()
+    if path.parent == storage_dir:
+        path.unlink(missing_ok=True)
+    return {"success": True}
 
 
 @app.put("/api/portal/state/{key}")
@@ -3517,7 +3642,9 @@ def supreme_unlock(
         removed += 1
     if not removed:
         raise HTTPException(status_code=404, detail="No lockout record found for this identifier and IP.")
-    record_audit(db, owner, "lockout_unlock", identifier[-4:], {})
+    record_audit(db, owner, "lockout_unlock", identifier[-4:], {
+        "group": body.group or "unspecified", "ipProvided": bool(body.ip.strip()), "removed": removed,
+    })
     db.commit()
     return {"unlocked": True}
 

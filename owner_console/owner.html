@@ -36,6 +36,7 @@
         <button type="button" data-tab="tickets" aria-selected="false">Service Desk</button>
         <button type="button" data-tab="logs" aria-selected="false">System logs</button>
         <button type="button" data-tab="database" aria-selected="false">Database</button>
+        <button type="button" data-tab="documents" aria-selected="false">Documents</button>
         <button type="button" data-tab="ai" aria-selected="false">AI Control Center</button>
     </nav>
 
@@ -89,12 +90,19 @@
                     <button class="oc-btn" id="sec-clear-lockouts" type="button">Clear lockouts</button>
                 </div>
                 <form id="sec-unlock-form">
-                    <h2>Unblock a sign-in</h2>
-                    <p class="oc-hint">Restores one blocked or locked identifier from one IP address. Permanent blocks stay until you do this.</p>
-                    <label>Mobile / Retail ID<input id="unlock-identifier" maxlength="20" required></label>
-                    <label>IP address <small>(optional: leave blank to clear an account lock)</small><input id="unlock-ip" maxlength="45"></label>
-                    <button class="oc-btn" type="submit">Unblock</button>
+                    <h2>Unblock Master Admin / Sub-Admin</h2>
+                    <p class="oc-hint">Restores a blocked or locked admin sign-in. Permanent blocks stay until you do this.</p>
+                    <label>Admin mobile / ID<input id="unlock-identifier" maxlength="20" required></label>
+                    <label>Blocked IP address <small>(optional: leave blank to clear an account lock)</small><input id="unlock-ip" maxlength="45"></label>
+                    <button class="oc-btn" type="submit">Unblock admin</button>
                     <div id="sec-blocked-list"></div>
+                </form>
+                <form id="sec-unlock-partner-form">
+                    <h2>Unblock Retailer / Distributor</h2>
+                    <p class="oc-hint">Restores a locked partner account by Retail ID or mobile number.</p>
+                    <label>Retailer / Distributor ID<input id="unlock-partner-identifier" maxlength="20" required></label>
+                    <label>Blocked IP address <small>(optional)</small><input id="unlock-partner-ip" maxlength="45"></label>
+                    <button class="oc-btn" type="submit">Unblock partner</button>
                 </form>
                 <form id="sec-revoke-form">
                     <h2>Sign out every other session</h2>
@@ -133,6 +141,25 @@
             <h2>Table sizes</h2>
             <div class="oc-card"><table class="oc-table" id="db-tables"></table></div>
             <p class="oc-hint" id="db-note"></p>
+        </section>
+
+        <section data-panel="documents" aria-labelledby="docs-title" hidden>
+            <h1 id="docs-title">Business documents</h1>
+            <p class="oc-hint">Upload your certificates and registrations (PDF, JPG or PNG, up to 10 MB). Files are encrypted at rest; images are shown with the R.M. Digital Centre watermark.</p>
+            <form class="oc-card oc-grid" id="doc-form">
+                <label>Document type
+                    <select name="doc_type" required>
+                        <option value="csc">CSC</option>
+                        <option value="tec">TEC</option>
+                        <option value="ezeepay">EzeePay</option>
+                        <option value="spice_money">Spice Money</option>
+                        <option value="udyam">Udyam</option>
+                    </select>
+                </label>
+                <label>File<input name="file" type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" required></label>
+                <button class="oc-btn" type="submit">Upload</button>
+            </form>
+            <div class="oc-card oc-scroll"><table class="oc-table" id="doc-table"></table></div>
         </section>
 
         <section data-panel="ai" aria-labelledby="ai-title" hidden>

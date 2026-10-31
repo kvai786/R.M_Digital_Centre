@@ -1,0 +1,19 @@
+{
+  "name": "rm-digital-centre-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor wrapper that packages the R.M Digital Centre portal as an Android APK.",
+  "scripts": {
+    "prepare:www": "node scripts/prepare-www.js",
+    "android:add": "cap add android",
+    "android:sync": "npm run prepare:www && cap sync android",
+    "android:build": "npm run android:sync && cd android && gradlew assembleRelease"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/core": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0"
+  }
+}

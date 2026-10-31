@@ -545,9 +545,47 @@
         $("ticket-list").replaceChildren(...(cards.length ? cards : [el("p", { class: "oc-hint", text: "No tickets." })]));
     }
 
+    async function apiUpload(path, formData) {
+        const response = await fetch(path, {
+            method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrfToken() },
+            credentials: "same-origin", body: formData,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ") : data.detail;
+            throw new Error(detail || "Upload failed.");
+        }
+        return data;
+    }
+
+    async function loadDocuments() {
+        const data = await guarded(() => api("/api/supreme/documents"));
+        if (!data) return;
+        const table = $("doc-table");
+        table.replaceChildren(el("tr", {}, ...["Type", "File", "Size", "Uploaded", ""].map((t) => el("th", { text: t }))));
+        if (!data.documents.length) {
+            table.append(el("tr", {}, el("td", { text: "No documents uploaded yet.", colspan: "5" })));
+            return;
+        }
+        for (const doc of data.documents) {
+            const view = el("a", { class: "oc-btn ghost", href: doc.viewUrl, target: "_blank", rel: "noopener", text: "View" });
+            const remove = el("button", { class: "oc-btn danger", type: "button", text: "Delete" });
+            remove.addEventListener("click", async () => {
+                if (!window.confirm("Delete " + doc.label + " document " + doc.fileName + "?")) return;
+                const done = await guarded(() => api("/api/supreme/documents/" + encodeURIComponent(doc.id), { method: "DELETE" }));
+                if (done) { notify("Document deleted."); loadDocuments(); }
+            });
+            table.append(el("tr", {},
+                el("td", { text: doc.label }), el("td", { text: doc.fileName }),
+                el("td", { text: Math.max(1, Math.round(doc.size / 1024)) + " KB" }),
+                el("td", { text: formatDate(doc.uploadedAt) }),
+                el("td", {}, view, remove)));
+        }
+    }
+
     const loaders = {
         overview: loadOverview, staff: loadStaff, security: loadSecurity, tickets: loadTickets,
-        logs: () => loadLogs(false), database: loadDatabase, ai: loadAi,
+        logs: () => loadLogs(false), database: loadDatabase, documents: loadDocuments, ai: loadAi,
     };
 
     async function init() {
@@ -565,6 +603,13 @@
         });
         $("oc-replay-greeting").addEventListener("click", () => speakGreeting());
         $("oc-play-greeting").addEventListener("click", () => speakGreeting());
+
+        $("doc-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const done = await guarded(() => apiUpload("/api/supreme/upload-document", new FormData(form)));
+            if (done) { form.reset(); notify(done.message); loadDocuments(); }
+        });
 
         $("staff-form").addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -589,13 +634,18 @@
             const done = await guarded(() => api("/api/supreme/security/clear-lockouts", { method: "POST" }));
             if (done) { notify(`Lockouts cleared: ${done.cleared}`); loadSecurity(); }
         });
-        $("sec-unlock-form").addEventListener("submit", async (event) => {
-            event.preventDefault();
-            const done = await guarded(() => api("/api/supreme/security/unlock", {
-                method: "POST", body: { identifier: $("unlock-identifier").value.trim(), ip: $("unlock-ip").value.trim() },
-            }));
-            if (done) { notify("Sign-in unblocked."); $("unlock-identifier").value = ""; $("unlock-ip").value = ""; loadSecurity(); }
-        });
+        function bindUnlock(formId, identifierId, ipId, group, label) {
+            $(formId).addEventListener("submit", async (event) => {
+                event.preventDefault();
+                const done = await guarded(() => api("/api/supreme/security/unlock", {
+                    method: "POST",
+                    body: { identifier: $(identifierId).value.trim(), ip: $(ipId).value.trim(), group },
+                }));
+                if (done) { notify(label + " unblocked."); $(identifierId).value = ""; $(ipId).value = ""; loadSecurity(); }
+            });
+        }
+        bindUnlock("sec-unlock-form", "unlock-identifier", "unlock-ip", "admin", "Admin sign-in");
+        bindUnlock("sec-unlock-partner-form", "unlock-partner-identifier", "unlock-partner-ip", "partner", "Partner sign-in");
         $("sec-revoke-form").addEventListener("submit", async (event) => {
             event.preventDefault();
             if (!window.confirm("Sign out every other session?")) return;

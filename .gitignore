@@ -9,3 +9,20 @@ rm_digital_centre.db
 *.sqlite
 *.sqlite3
 private_documents/
+
+# Backup tooling, secrets and databases must never reach a remote
+backup.py
+test_backup_system.py
+credentials.json
+RM_Digital_Centre_Backups/
+backup_*/
+.rm_backup_2fa
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.enc
+
+node_modules/
+www/
+android/
