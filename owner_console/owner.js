@@ -158,6 +158,20 @@
             }
             return card;
         }));
+        loadAlerts();
+    }
+
+    async function loadAlerts() {
+        const data = await guarded(() => api("/api/supreme/alerts"));
+        if (!data) return;
+        const unread = data.alerts.filter((a) => !a.read).length;
+        $("alerts-count").textContent = unread ? `(${unread} new)` : "";
+        const rows = data.alerts.slice(0, 20).map((a) => el("div", { class: "oc-row" },
+            el("div", { class: "oc-row-head" },
+                el("span", { class: "oc-badge", text: a.kind + (a.read ? "" : " | new") }),
+                el("span", { class: "oc-hint", text: formatDate(a.createdAt) })),
+            el("div", { class: "oc-q", text: a.message })));
+        $("alerts-list").replaceChildren(...(rows.length ? rows : [el("p", { class: "oc-hint", text: "No alerts." })]));
     }
 
     /* Modal, list view, application detail and approval */
@@ -320,8 +334,8 @@
         const row = (label, value, flag) => [label, ...(flag ? yn(value, true) : [value, ""])];
         const rows = [
             row("Session lifetime (hours)", d.sessionLifetimeHours),
-            row("Login failure limit", d.loginFailureLimit),
-            row("Lockout (minutes)", d.lockoutMinutes),
+            row("Login lockout policy", d.lockoutPolicy),
+            row("CAPTCHA after failures", d.captchaAfterFailures),
             row("Secure cookies", d.secureCookies, true),
             row("Dedicated CSRF secret", d.dedicatedCsrfSecret, true),
             row("KYC retention (days)", d.kycRetentionDays),
@@ -331,9 +345,17 @@
                 d.bootstrapTokenConfigured ? "oc-warn" : "oc-ok"],
             row("Active sessions", d.activeSessions),
             ["Active lockouts", d.activeLockouts, d.activeLockouts ? "oc-warn" : ""],
+            ["Active lockouts", d.activeLockouts, d.activeLockouts ? "oc-warn" : ""],
+            ["Permanent blocks", d.blocked.length, d.blocked.length ? "oc-warn" : "oc-ok"],
             ["Staff without 2FA enrolled", d.staffWithoutTwoFactor, d.staffWithoutTwoFactor ? "oc-warn" : "oc-ok"],
         ];
         fillTable($("sec-table"), rows);
+        const list = $("sec-blocked-list");
+        list.replaceChildren(...(d.blocked.length ? d.blocked.map((item) => {
+            const use = el("button", { type: "button", class: "oc-btn small", text: "Use" });
+            use.addEventListener("click", () => { $("unlock-ip").value = item.ip; $("unlock-identifier").focus(); });
+            return el("p", { class: "oc-hint" }, document.createTextNode(`IP ${item.ip} - ID ending ${item.identifierHint} `), use);
+        }) : [el("p", { class: "oc-hint", text: "No permanent blocks." })]));
     }
 
     /* Logs */
@@ -492,8 +514,39 @@
         box.hidden = false;
     }
 
+    function ticketCard(t) {
+        const reply = el("textarea", { rows: "2", maxlength: "1000", placeholder: "Reply to the partner" });
+        reply.value = t.reply || "";
+        const status = el("select", {},
+            ...[["open", "Open"], ["in_progress", "In progress"], ["closed", "Closed"]]
+                .map(([value, label]) => el("option", { value, text: label })));
+        status.value = t.status;
+        const save = el("button", { class: "oc-btn", type: "button", text: "Save" });
+        save.addEventListener("click", async () => {
+            const done = await guarded(() => api(`/api/supreme/tickets/${encodeURIComponent(t.id)}/update`, {
+                method: "POST", body: { status: status.value, reply: reply.value.trim() },
+            }));
+            if (done) { notify("Ticket updated."); loadTickets(); }
+        });
+        return el("div", { class: "oc-row" },
+            el("div", { class: "oc-row-head" },
+                el("span", { class: "oc-badge", text: `${t.id} | ${t.category} | ${t.status}` }),
+                el("span", { class: "oc-hint", text: formatDate(t.createdAt) })),
+            el("div", { class: "oc-q", text: `${t.name} (${t.mobile}, ${t.role}): ${t.subject}` }),
+            el("div", { class: "oc-a", text: t.message + (t.reference ? `\nRef: ${t.reference}` : "") }),
+            reply, status, save);
+    }
+
+    async function loadTickets() {
+        const filter = $("ticket-filter").value;
+        const data = await guarded(() => api("/api/supreme/tickets" + (filter ? "?status=" + filter : "")));
+        if (!data) return;
+        const cards = data.tickets.map(ticketCard);
+        $("ticket-list").replaceChildren(...(cards.length ? cards : [el("p", { class: "oc-hint", text: "No tickets." })]));
+    }
+
     const loaders = {
-        overview: loadOverview, staff: loadStaff, security: loadSecurity,
+        overview: loadOverview, staff: loadStaff, security: loadSecurity, tickets: loadTickets,
         logs: () => loadLogs(false), database: loadDatabase, ai: loadAi,
     };
 
@@ -536,6 +589,13 @@
             const done = await guarded(() => api("/api/supreme/security/clear-lockouts", { method: "POST" }));
             if (done) { notify(`Lockouts cleared: ${done.cleared}`); loadSecurity(); }
         });
+        $("sec-unlock-form").addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const done = await guarded(() => api("/api/supreme/security/unlock", {
+                method: "POST", body: { identifier: $("unlock-identifier").value.trim(), ip: $("unlock-ip").value.trim() },
+            }));
+            if (done) { notify("Sign-in unblocked."); $("unlock-identifier").value = ""; $("unlock-ip").value = ""; loadSecurity(); }
+        });
         $("sec-revoke-form").addEventListener("submit", async (event) => {
             event.preventDefault();
             if (!window.confirm("Sign out every other session?")) return;
@@ -544,6 +604,12 @@
             if (done) { notify(`Sessions revoked: ${done.revoked}`); loadSecurity(); }
         });
 
+        $("alerts-read").addEventListener("click", async () => {
+            const done = await guarded(() => api("/api/supreme/alerts/read", { method: "POST" }));
+            if (done) loadAlerts();
+        });
+        $("ticket-refresh").addEventListener("click", loadTickets);
+        $("ticket-filter").addEventListener("change", loadTickets);
         $("log-refresh").addEventListener("click", () => loadLogs(false));
         $("log-action").addEventListener("change", () => loadLogs(false));
         $("log-more").addEventListener("click", () => loadLogs(true));

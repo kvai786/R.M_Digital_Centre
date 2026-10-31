@@ -35,7 +35,9 @@ async function apiRequest(path, options) {
     const response = await fetch(path, requestOptions);
     const result = await response.json().catch(function () { return {}; });
     if (!response.ok) {
-        throw new Error(result.detail || "The server could not complete this request.");
+        const failure = new Error(result.detail || "The server could not complete this request.");
+        failure.captchaRequired = Boolean(result.captchaRequired);
+        throw failure;
     }
     return result;
 }
@@ -597,6 +599,8 @@ function initializePortalLogin() {
     function showMobileStep() {
         selectedAccount = null;
         preAuth = "";
+        captchaToken = "";
+        captchaField.hidden = true;
         showOnly(mobileForm);
         document.getElementById("login-mobile").focus();
     }
@@ -765,6 +769,15 @@ function initializePortalLogin() {
             password: document.getElementById("login-password").value,
             name: document.getElementById("login-name").value.trim(),
         };
+        if (!captchaField.hidden) {
+            const answer = document.getElementById("login-captcha").value.trim();
+            if (!captchaToken || !answer) {
+                setStatus("Enter the characters shown in the security check.");
+                return;
+            }
+            payload.captchaToken = captchaToken;
+            payload.captchaAnswer = answer;
+        }
         try {
             const result = await apiRequest("/api/auth/login", { method: "POST", body: payload });
             if (result.twoFactor) {
@@ -775,9 +788,30 @@ function initializePortalLogin() {
         } catch (error) {
             setStatus(error.message);
             document.getElementById("login-password").value = "";
-            document.getElementById("login-password").focus();
+            if (error.captchaRequired || !captchaField.hidden) {
+                await loadCaptcha();
+            } else {
+                document.getElementById("login-password").focus();
+            }
         }
     });
+
+    const captchaField = document.getElementById("login-captcha-field");
+    let captchaToken = "";
+
+    async function loadCaptcha() {
+        try {
+            const challenge = await apiRequest("/api/auth/captcha");
+            captchaToken = challenge.token;
+            document.getElementById("login-captcha-image").src = challenge.image;
+            document.getElementById("login-captcha").value = "";
+            captchaField.hidden = false;
+            document.getElementById("login-captcha").focus();
+        } catch (error) {
+            setStatus(error.message);
+        }
+    }
+    document.getElementById("login-captcha-refresh").addEventListener("click", loadCaptcha);
 
     retailerActivationForm.addEventListener("submit", async function (event) {
         event.preventDefault();
@@ -1007,10 +1041,15 @@ function initializeSupport(user, knownHelpline) {
                 const tickets = await apiRequest("/api/support/tickets");
                 mine.innerHTML = tickets.length ? tickets.map(function (ticket) {
                     return '<article class="application-card"><div class="application-details"><span class="application-type">' +
-                        escapeHTML(ticket.category) + ' · ' + escapeHTML(ticket.status) + '</span><h3>' +
-                        escapeHTML(ticket.subject) + '</h3><p>' + escapeHTML(ticket.message) + '</p><small>' +
+                        escapeHTML(ticket.category) + ' · ' + escapeHTML(ticket.status) +
+                        (ticket.replyUnread ? ' · <strong>New reply</strong>' : '') + '</span><h3>' +
+                        escapeHTML(ticket.subject) + '</h3><p>' + escapeHTML(ticket.message) + '</p>' +
+                        (ticket.reply ? '<p><strong>Support reply:</strong> ' + escapeHTML(ticket.reply) + '</p>' : '') + '<small>' +
                         escapeHTML(ticket.id) + ' · ' + escapeHTML(formatDate(ticket.createdAt)) + '</small></div></article>';
                 }).join("") : '<p class="empty-state">You have not submitted any tickets.</p>';
+                tickets.filter(function (ticket) { return ticket.replyUnread; }).forEach(function (ticket) {
+                    apiRequest("/api/support/tickets/" + encodeURIComponent(ticket.id) + "/read", { method: "POST" }).catch(function () {});
+                });
             } catch (error) {
                 setNote(status, error.message);
             }
@@ -1025,7 +1064,7 @@ function initializeSupport(user, knownHelpline) {
                         method: "POST",
                         body: {
                             category: String(data.get("category")), subject: String(data.get("subject")).trim(),
-                            message: String(data.get("message")).trim(),
+                            message: String(data.get("message")).trim(), reference: String(data.get("reference") || "").trim(),
                         },
                     });
                     form.reset();

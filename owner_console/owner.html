@@ -33,6 +33,7 @@
         <button type="button" data-tab="overview" aria-selected="true">Overview</button>
         <button type="button" data-tab="staff" aria-selected="false">Staff</button>
         <button type="button" data-tab="security" aria-selected="false">Security</button>
+        <button type="button" data-tab="tickets" aria-selected="false">Service Desk</button>
         <button type="button" data-tab="logs" aria-selected="false">System logs</button>
         <button type="button" data-tab="database" aria-selected="false">Database</button>
         <button type="button" data-tab="ai" aria-selected="false">AI Control Center</button>
@@ -44,6 +45,11 @@
         <section data-panel="overview" aria-labelledby="ov-title">
             <h1 id="ov-title">Overview</h1>
             <div class="oc-cards" id="ov-cards"></div>
+            <div class="oc-toolbar">
+                <h2 id="alerts-title">Alerts <span id="alerts-count"></span></h2>
+                <button class="oc-btn ghost" id="alerts-read" type="button">Mark all read</button>
+            </div>
+            <div id="alerts-list"></div>
         </section>
 
         <section data-panel="staff" aria-labelledby="staff-title" hidden>
@@ -82,6 +88,14 @@
                     <p class="oc-hint">Removes all failed-attempt counters and active lockouts.</p>
                     <button class="oc-btn" id="sec-clear-lockouts" type="button">Clear lockouts</button>
                 </div>
+                <form id="sec-unlock-form">
+                    <h2>Unblock a sign-in</h2>
+                    <p class="oc-hint">Restores one blocked or locked identifier from one IP address. Permanent blocks stay until you do this.</p>
+                    <label>Mobile / Retail ID<input id="unlock-identifier" maxlength="20" required></label>
+                    <label>IP address <small>(optional: leave blank to clear an account lock)</small><input id="unlock-ip" maxlength="45"></label>
+                    <button class="oc-btn" type="submit">Unblock</button>
+                    <div id="sec-blocked-list"></div>
+                </form>
                 <form id="sec-revoke-form">
                     <h2>Sign out every other session</h2>
                     <p class="oc-hint">Ends all sessions except this one. Confirm with your password.</p>
@@ -89,6 +103,18 @@
                     <button class="oc-btn danger" type="submit">Revoke sessions</button>
                 </form>
             </div>
+        </section>
+
+        <section data-panel="tickets" aria-labelledby="tickets-title" hidden>
+            <h1 id="tickets-title">Service Desk</h1>
+            <div class="oc-toolbar">
+                <label>Status<select id="ticket-filter">
+                    <option value="">All</option><option value="open">Open</option>
+                    <option value="in_progress">In progress</option><option value="closed">Closed</option>
+                </select></label>
+                <button class="oc-btn ghost" id="ticket-refresh" type="button">Refresh</button>
+            </div>
+            <div id="ticket-list"></div>
         </section>
 
         <section data-panel="logs" aria-labelledby="logs-title" hidden>
@@ -192,6 +218,7 @@
         </section>
     </main>
     <script src="/supreme-owner/assets/owner.js"></script>
+    <script src="/rm-voice.js"></script>
     <script src="/portal-assistant.js"></script>
 </body>
 </html>

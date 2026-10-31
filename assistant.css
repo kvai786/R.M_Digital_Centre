@@ -114,6 +114,20 @@
 .rm-chat-msg.bot { align-self: flex-start; background: #fff; border: 1px solid #e2e8f0; }
 .rm-chat-msg.user { align-self: flex-end; background: #0e7490; color: #fff; }
 
+.rm-tts-btn {
+    margin-left: 8px;
+    padding: 2px 7px;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #f8fafc;
+    font-size: 14px;
+    line-height: 1.2;
+    cursor: pointer;
+    vertical-align: middle;
+}
+.rm-tts-btn:hover, .rm-tts-btn:focus-visible { background: #e0f2fe; border-color: #0e7490; }
+.rm-tts-btn.playing { background: #0e7490; border-color: #0e7490; }
+
 .rm-chat-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; background: #f1f5f9; }
 .rm-chat-chips button {
     padding: 5px 11px;

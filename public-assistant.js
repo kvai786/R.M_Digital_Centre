@@ -82,11 +82,17 @@
         document.body.append(root, panel);
 
         function addMessage(text, who) {
-            log.append(el("div", "rm-chat-msg " + who, text));
+            const message = el("div", "rm-chat-msg " + who);
+            message.append(el("span", "", text));
+            if (who === "bot" && window.RMVoice && window.RMVoice.supported()) {
+                message.append(window.RMVoice.createButton(function () { return text; }));
+            }
+            log.append(message);
             log.scrollTop = log.scrollHeight;
         }
 
         async function submit(text) {
+            if (window.RMVoice) { window.RMVoice.noteUserQuery(text); }
             addMessage(text, "user");
             send.disabled = true;
             try {

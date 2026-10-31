@@ -17,7 +17,7 @@
             <img src="icon.svg" alt="" aria-hidden="true">
             <span><strong>R.M</strong><small>Digital Centre</small></span>
         </a>
-        <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="register.html">Apply to join</a></nav>
+        <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="register.html">Apply to join</a><a href="track.html">Track status</a></nav>
     </header>
     <main id="main-content" class="form-page">
         <section class="form-card" aria-labelledby="page-title">
@@ -33,6 +33,12 @@
             </div>
             <form id="login-password-form" class="flow-step" hidden>
                 <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required></div>
+                <div class="field" id="login-captcha-field" hidden>
+                    <label for="login-captcha">Security check - type the characters shown</label>
+                    <img id="login-captcha-image" alt="Security check image" width="190" height="64">
+                    <input id="login-captcha" name="captcha" autocomplete="off" autocapitalize="characters" maxlength="8">
+                    <button class="text-button" type="button" id="login-captcha-refresh">Show a new image</button>
+                </div>
                 <button class="btn primary form-submit" type="submit">Sign in</button>
                 <button class="text-button" type="button" id="forgot-password">Forgot password?</button>
                 <button class="text-button" type="button" id="change-number">Use a different number</button>

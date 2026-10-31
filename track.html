@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="description" content="Track the status of your R.M Digital Centre application, service request or transaction.">
+    <title>Track status | R.M Digital Centre</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+    <header class="navbar">
+        <a class="logo" href="index.html" aria-label="R.M Digital Centre home">
+            <img src="icon.svg" alt="" aria-hidden="true">
+            <span><strong>R.M</strong><small>Digital Centre</small></span>
+        </a>
+        <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="login.html">Portal login</a></nav>
+    </header>
+    <main id="main-content" class="form-page">
+        <section class="form-card" aria-labelledby="page-title">
+            <h1 id="page-title">Track your request</h1>
+            <p class="form-intro">Enter your Application ID, Ticket ID (TKT-...) or Transaction reference together with the mobile number you registered with.</p>
+            <form id="track-form" novalidate>
+                <div class="field"><label for="track-reference">Application / Ticket / Transaction ID</label><input id="track-reference" name="reference" autocomplete="off" maxlength="80" required></div>
+                <div class="field"><label for="track-mobile">Registered mobile number</label><input id="track-mobile" name="mobile" inputmode="numeric" autocomplete="tel" maxlength="10" required></div>
+                <button class="btn primary form-submit" type="submit">Check status</button>
+            </form>
+            <p class="form-status" id="track-status" role="status" aria-live="polite" hidden></p>
+            <div id="track-result" class="application-card" aria-live="polite" hidden>
+                <div class="application-details">
+                    <span class="application-type" id="track-kind"></span>
+                    <h2 id="track-stage"></h2>
+                    <p id="track-label"></p>
+                    <p id="track-reply" hidden></p>
+                    <small id="track-updated"></small>
+                </div>
+            </div>
+        </section>
+    </main>
+    <script src="track.js"></script>
+</body>
+</html>

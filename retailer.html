@@ -18,7 +18,7 @@
             <img src="icon.svg" alt="" aria-hidden="true">
             <span><strong>R.M</strong><small>Digital Centre</small></span>
         </a>
-        <nav aria-label="Main navigation"><a href="index.html">Home</a><button class="text-button retailer-signout" id="retailer-signout" type="button">Sign out</button></nav>
+        <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="commission.html">Commission slabs</a><button class="text-button retailer-signout" id="retailer-signout" type="button">Sign out</button></nav>
     </header>
     <main id="main-content" class="dashboard-page">
         <section class="form-card" id="retailer-access-denied" hidden>
@@ -51,7 +51,8 @@
             <section class="dashboard-section" aria-labelledby="ticket-title">
                 <div class="section-heading"><div><p class="eyebrow">SUPPORT</p><h2 id="ticket-title">Raise a support ticket or complaint</h2></div></div>
                 <form class="whitelist-form support-ticket-form" id="support-ticket-form">
-                    <div class="field"><label for="ticket-category">Type</label><select id="ticket-category" name="category"><option value="support">Support</option><option value="complaint">Complaint</option><option value="service">Service</option><option value="other">Other</option></select></div>
+                    <div class="field"><label for="ticket-category">Type</label><select id="ticket-category" name="category"><option value="support">Support</option><option value="complaint">Complaint</option><option value="service">Service</option><option value="aeps">AEPS failure</option><option value="payout">Payout issue</option><option value="transaction">Transaction issue</option><option value="other">Other</option></select></div>
+                    <div class="field"><label for="ticket-reference">Transaction / application ID (optional)</label><input id="ticket-reference" name="reference" maxlength="80" pattern="[A-Za-z0-9_\-/]*"></div>
                     <div class="field"><label for="ticket-subject">Subject</label><input id="ticket-subject" name="subject" minlength="3" maxlength="100" required></div>
                     <div class="field"><label for="ticket-message">Details</label><textarea id="ticket-message" name="message" minlength="5" maxlength="1000" rows="4" required></textarea></div>
                     <button class="btn primary" type="submit">Submit ticket</button>
@@ -65,6 +66,7 @@
     </main>
     <footer class="footer"><p>&copy; <span id="current-year">2026</span> R.M Digital Centre. Partner profile.</p></footer>
     <script src="app.js"></script>
+    <script src="rm-voice.js"></script>
     <script src="portal-assistant.js"></script>
 </button>
 </body>

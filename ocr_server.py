@@ -17,11 +17,13 @@ from platform import system
 import re
 import secrets
 import threading
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, ClassVar
+import unicodedata
 from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, func, inspect, select, text
@@ -55,6 +57,17 @@ MAX_IMAGE_PIXELS = 20_000_000
 SESSION_LIFETIME = timedelta(hours=8)
 LOGIN_FAILURE_LIMIT = 10
 LOGIN_LOCK_TIME = timedelta(minutes=15)
+# Progressive sign-in defence. Each lockout moves the (IP, identifier) pair to the next tier:
+# (failures allowed before lockout, lock duration); a duration of None is a permanent block.
+LOGIN_LOCKOUT_TIERS: tuple[tuple[int, timedelta | None], ...] = (
+    (10, timedelta(minutes=15)),
+    (5, timedelta(minutes=30)),
+    (3, timedelta(hours=1)),
+    (1, None),
+)
+CAPTCHA_AFTER_FAILURES = 3
+CAPTCHA_TTL_SECONDS = 300
+CAPTCHA_ALPHABET = "ACDEFGHJKLMNPRTUVWXY34679"
 MASTER_ADMIN_MOBILE = os.getenv("MASTER_ADMIN_MOBILE", "8509010483")
 COOKIE_NAME = "rm_portal_session"
 LOGGER = logging.getLogger(__name__)
@@ -101,6 +114,22 @@ CSRF_EXEMPT_PATHS = {
     "/api/auth/recover", "/api/retailer/activate", "/api/auth/staff-setup",
     "/api/auth/2fa/enroll-start", "/api/auth/2fa/enroll-verify", "/api/auth/2fa/verify",
     "/api/applications", "/api/service-enquiries", "/api/scan-document", "/api/public/assistant/chat",
+    "/api/public/track",
+}
+TRACK_LIMITER = RateLimiter(limit=8, window_seconds=60)
+TICKET_STATUSES = ("open", "in_progress", "closed")
+OWNER_ALERTS_KEY = "rm-owner-alerts"
+COMMISSION_KEY = "rm-commission-slabs"
+# Identifier-only lockout is opt-in; the owner's own number is exempt so it cannot be used to lock the owner out.
+ACCOUNT_LOCKOUT_ENABLED = os.getenv("ACCOUNT_LOCKOUT_ENABLED", "0").lower() in {"1", "true", "yes"}
+ACCOUNT_LOCKOUT_THRESHOLD = max(5, int(os.getenv("ACCOUNT_LOCKOUT_THRESHOLD", "20")))
+ACCOUNT_LOCKOUT_MINUTES = max(1, int(os.getenv("ACCOUNT_LOCKOUT_MINUTES", "30")))
+TRANSACTION_TRANSITIONS = {
+    "recorded": {"processing", "success", "failed"},
+    "processing": {"success", "failed"},
+    "success": {"refunded"},
+    "failed": set(),
+    "refunded": set(),
 }
 APPLICATION_RATE_LIMIT = 10
 APPLICATION_RATE_WINDOW = timedelta(hours=1)
@@ -110,7 +139,8 @@ STATIC_FILES = {
     "dashboard.html", "dashboard.css", "dashboard.js",
     "styles.css", "app.js", "home-services.js", "manifest.json", "sw.js", "icon.svg",
     "icon-192.png", "icon-512.png", "assistant.css", "public-assistant.js", "portal-assistant.js",
-}
+        "rm-voice.js", "track.html", "track.js", "commission.html", "commission.js",
+    }
 APPLICATIONS_KEY = "rm-demo-applications"
 MASTER_ONLY_KEYS = STATE_KEYS - {
     "rm-demo-applications", "rm-demo-blocked-partner-mobiles",
@@ -320,6 +350,11 @@ class LoginAttempt(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     failures: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tier: Mapped[int] = mapped_column(Integer, default=0)
+    permanent: Mapped[bool] = mapped_column(default=False)
+    remote: Mapped[str] = mapped_column(String(45), default="")
+    id_hint: Mapped[str] = mapped_column(String(8), default="")
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TransactionRecord(Base):
@@ -334,8 +369,63 @@ class TransactionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+UNSAFE_MARKUP = re.compile(r"[<>]|javascript\s*:|vbscript\s*:|data\s*:\s*text/html|\bon[a-z]{3,20}\s*=", re.IGNORECASE)
+UNSAFE_SQL = re.compile(r"--|/\*|\*/|;|`")
+# Names and addresses may contain an apostrophe (O'Connor, St. Mary's) unless it looks like a SQL string break-out.
+APOSTROPHE_FIELDS = {"name", "business", "address", "city"}
+SQL_BREAKOUT = re.compile(
+    r"'\s*(or|and|union|select|insert|update|delete|drop|having|where|exec|waitfor|sleep)\b|'\s*(=|\||\)|--)|(=|\()\s*'",
+    re.IGNORECASE,
+)
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Secrets are hashed/verified, never rendered or stored as text, so they may contain any printable character.
+SECRET_FIELDS = {
+    "password", "recovery", "activationToken", "bootstrapToken", "captchaToken", "captchaAnswer",
+    "preAuth", "code", "officialCredentials",
+}
+# Identity-style fields never need double quotes either.
+STRICT_FIELDS = {
+    "identifier", "name", "business", "city", "scope", "jurisdiction", "referralCode", "email",
+    "reference", "service", "officialPortalId", "distributorApplicationId", "mobile",
+}
+
+
+def reject_unsafe_text(value: Any, field: str, sql_checks: bool) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            reject_unsafe_text(str(key), field, sql_checks)
+            reject_unsafe_text(item, field, sql_checks)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            reject_unsafe_text(item, field, sql_checks)
+        return
+    if not isinstance(value, str):
+        return
+    # NFKC folds look-alikes such as full-width "<" so they cannot slip past the filters.
+    text_value = unicodedata.normalize("NFKC", value)
+    unsafe = bool(CONTROL_CHARS.search(text_value) or UNSAFE_MARKUP.search(text_value))
+    if sql_checks:
+        unsafe = unsafe or bool(UNSAFE_SQL.search(text_value))
+        if "'" in text_value:
+            unsafe = unsafe or field not in APOSTROPHE_FIELDS or bool(SQL_BREAKOUT.search(text_value))
+        if field in STRICT_FIELDS:
+            unsafe = unsafe or '"' in text_value
+    if unsafe:
+        raise ValueError("contains characters or patterns that are not allowed")
+
+
 class InputModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    scan_text: ClassVar[bool] = True
+    sql_checks: ClassVar[bool] = True
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def reject_injection(cls, value: Any, info: ValidationInfo) -> Any:
+        if cls.scan_text and info.field_name not in SECRET_FIELDS:
+            reject_unsafe_text(value, info.field_name or "", cls.sql_checks)
+        return value
 
 
 class AuthInput(InputModel):
@@ -345,6 +435,8 @@ class AuthInput(InputModel):
     activationToken: str = Field(default="", max_length=256)
     name: str = Field(default="", max_length=80)
     bootstrapToken: str = Field(default="", max_length=256)
+    captchaToken: str = Field(default="", max_length=200)
+    captchaAnswer: str = Field(default="", max_length=12)
 
 
 class RecoveryInput(InputModel):
@@ -374,6 +466,12 @@ class StaffAuthorizationInput(InputModel):
 
 class StaffActionInput(InputModel):
     action: str = Field(pattern=r"^(approve|reject|revoke|reset)$")
+    role: str | None = Field(default=None, pattern=r"^(masteradmin|subadmin)$")
+
+
+class UnlockInput(InputModel):
+    identifier: str = Field(min_length=4, max_length=20)
+    ip: str = Field(default="", max_length=45, pattern=r"^[0-9A-Fa-f:.]*$")
 
 
 class HelplineInput(InputModel):
@@ -381,11 +479,43 @@ class HelplineInput(InputModel):
 
 
 class SupportTicketInput(InputModel):
-    category: str = Field(pattern=r"^(complaint|support|service|other)$")
+    category: str = Field(pattern=r"^(complaint|support|service|aeps|payout|transaction|other)$")
     subject: str = Field(min_length=3, max_length=100)
     message: str = Field(min_length=5, max_length=1000)
+    reference: str = Field(default="", pattern=r"^[A-Za-z0-9_\-/]{0,80}$")
+
+
+class TicketUpdateInput(InputModel):
+    status: str = Field(pattern=r"^(open|in_progress|closed)$")
+    reply: str = Field(default="", max_length=1000)
+
+
+class TransactionStatusInput(InputModel):
+    status: str = Field(pattern=r"^(processing|success|failed|refunded)$")
+    note: str = Field(default="", max_length=200)
+
+
+class SlabRow(InputModel):
+    service: str = Field(pattern=r"^(aeps|micro_atm|bill_payment)$")
+    label: str = Field(min_length=2, max_length=60)
+    minAmount: int = Field(ge=0, le=10_000_000)
+    maxAmount: int = Field(ge=0, le=10_000_000)
+    unit: str = Field(pattern=r"^(percent|flat)$")
+    retailerRate: float = Field(ge=0, le=100)
+    distributorRate: float = Field(ge=0, le=100)
+
+
+class CommissionInput(InputModel):
+    slabs: list[SlabRow] = Field(max_length=60)
+
+
+class TrackInput(InputModel):
+    reference: str = Field(min_length=4, max_length=80, pattern=r"^[A-Za-z0-9_\-/]+$")
+    mobile: str = Field(pattern=r"^\d{10}$")
+
 
 class StateInput(InputModel):
+    scan_text = False  # Opaque dashboard state; it is only ever rendered through escaping helpers.
     value: list[dict[str, Any]]
 
 
@@ -407,6 +537,8 @@ class ApplicationInput(InputModel):
     mobileConfirmed: bool = False
     privacyAccepted: bool = False
     website: str = Field(default="", max_length=200)
+
+    @field_validator("name", "business", "address", "city")
     @classmethod
     def normalize_required_text(cls, value: str, info: ValidationInfo) -> str:
         normalized = value.strip()
@@ -554,6 +686,15 @@ def save_record(db: Session, key: str, value: list[dict[str, Any]]) -> None:
 
 
 PASSWORD_HASHER = PasswordHasher()
+
+
+def add_owner_alert(db: Session, kind: str, message: str, ref: str = "") -> None:
+    alerts = record_value(db, OWNER_ALERTS_KEY)
+    alert = {
+        "id": uuid4().hex[:12], "kind": kind, "message": message[:200], "ref": ref[:80],
+        "createdAt": utc_now().isoformat(), "read": False,
+    }
+    save_record(db, OWNER_ALERTS_KEY, [alert, *alerts][:200])
 
 
 def hash_secret(secret: str) -> str:
@@ -730,6 +871,18 @@ def ensure_schema_columns() -> None:
         for name, definition in additions.items():
             if name not in user_columns:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {definition}"))
+    attempt_columns = {column["name"] for column in inspect(engine).get_columns("login_attempts")}
+    attempt_additions = {
+        "tier": "INTEGER NOT NULL DEFAULT 0",
+        "permanent": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "remote": "VARCHAR(45) NOT NULL DEFAULT ''",
+        "id_hint": "VARCHAR(8) NOT NULL DEFAULT ''",
+        "blocked_at": "TIMESTAMP",
+    }
+    with engine.begin() as connection:
+        for name, definition in attempt_additions.items():
+            if name not in attempt_columns:
+                connection.execute(text(f"ALTER TABLE login_attempts ADD COLUMN {name} {definition}"))
 
 
 def make_preauth_token(user: User) -> str:
@@ -910,6 +1063,85 @@ def throttle_clear(db: Session, key: str) -> None:
         db.commit()
 
 
+_captcha_used: dict[str, int] = {}
+
+
+def captcha_signature(nonce: str, expires: int, answer: str) -> str:
+    return hmac_new(csrf_secret(), f"captcha|{nonce}|{expires}|{answer}".encode(), sha256).hexdigest()
+
+
+def new_captcha() -> dict[str, str]:
+    """Self-hosted image CAPTCHA: the answer only lives inside an HMAC, never in the response."""
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+    answer = "".join(secrets.choice(CAPTCHA_ALPHABET) for _ in range(5))
+    width, height = 190, 64
+    image = Image.new("RGB", (width, height), (241, 245, 249))
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.load_default(size=34)
+    except TypeError:
+        font = ImageFont.load_default()
+    for _ in range(7):
+        draw.line(
+            [(secrets.randbelow(width), secrets.randbelow(height)), (secrets.randbelow(width), secrets.randbelow(height))],
+            fill=(100 + secrets.randbelow(100), 116, 139), width=2,
+        )
+    for index, character in enumerate(answer):
+        x, y = 12 + index * 33 + secrets.randbelow(6), 8 + secrets.randbelow(12)
+        draw.text((x, y), character, font=font, fill=(15 + secrets.randbelow(50), 23, 42 + secrets.randbelow(60)))
+    for _ in range(120):
+        draw.point((secrets.randbelow(width), secrets.randbelow(height)), fill=(71, 85, 105))
+    image = image.filter(ImageFilter.SMOOTH)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    nonce = secrets.token_urlsafe(9)
+    expires = int(utc_now().timestamp()) + CAPTCHA_TTL_SECONDS
+    return {
+        "token": f"{nonce}.{expires}.{captcha_signature(nonce, expires, answer)}",
+        "image": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode(),
+    }
+
+
+def verify_captcha(token: str, answer: str) -> bool:
+    """Single use: a token is spent by its first submission, right or wrong."""
+    try:
+        nonce, expires_text, signature = token.split(".")
+        expires = int(expires_text)
+    except ValueError:
+        return False
+    now = int(utc_now().timestamp())
+    for stale in [item for item, until in _captcha_used.items() if until < now]:
+        del _captcha_used[stale]
+    if expires < now or nonce in _captcha_used:
+        return False
+    _captcha_used[nonce] = expires
+    expected = captcha_signature(nonce, expires, answer.strip().upper())
+    return compare_digest(signature, expected)
+
+
+def captcha_required(attempt: LoginAttempt | None) -> bool:
+    return bool(attempt and (attempt.tier > 0 or attempt.failures >= CAPTCHA_AFTER_FAILURES))
+
+
+def aware(value: datetime | None) -> datetime | None:
+    return value.replace(tzinfo=UTC) if value is not None and value.tzinfo is None else value
+
+
+def register_login_failure(attempt: LoginAttempt, now: datetime) -> None:
+    """Advance the progressive lockout: 10 -> 15 min, 5 -> 30 min, 3 -> 1 h, then a permanent block."""
+    limit, duration = LOGIN_LOCKOUT_TIERS[min(attempt.tier, len(LOGIN_LOCKOUT_TIERS) - 1)]
+    attempt.failures += 1
+    if attempt.failures < limit:
+        return
+    attempt.failures = 0
+    attempt.tier += 1
+    if duration is None:
+        attempt.permanent, attempt.blocked_at, attempt.locked_until = True, now, None
+    else:
+        attempt.locked_until = now + duration
+
+
 def application_values(db: Session) -> list[dict[str, Any]]:
     rows = db.scalars(select(Application).order_by(Application.submitted_at.desc()))
     return [dict(row.payload) for row in rows]
@@ -938,6 +1170,15 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="R.M Digital Centre Portal API", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_: Request, error: RequestValidationError) -> JSONResponse:
+    """Return one readable message and never echo the rejected input back to the client."""
+    first = error.errors()[0] if error.errors() else {}
+    field = str(first.get("loc", ("input",))[-1])
+    reason = str(first.get("msg", "is invalid")).removeprefix("Value error, ")
+    return JSONResponse(status_code=422, content={"detail": f"Invalid {field}: {reason}."})
 
 
 @app.middleware("http")
@@ -1091,6 +1332,11 @@ def setup_account(
     return {"user": session_user_data(user)}
 
 
+@app.get("/api/auth/captcha")
+def auth_captcha() -> dict[str, str]:
+    return new_captcha()
+
+
 @app.post("/api/auth/login")
 def login(
     body: AuthInput, request: Request, response: Response, db: Session = Depends(get_db),
@@ -1100,11 +1346,58 @@ def login(
     attempt_key = sha256((remote + "|" + identifier.casefold()).encode()).hexdigest()
     attempt = db.get(LoginAttempt, attempt_key)
     now = utc_now()
-    locked_until = attempt.locked_until if attempt else None
-    if locked_until and locked_until.tzinfo is None:
-        locked_until = locked_until.replace(tzinfo=UTC)
+    if attempt and attempt.permanent:
+        raise HTTPException(
+            status_code=423,
+            detail="Sign-in is blocked for this connection. Contact the Supreme Owner to restore access.",
+        )
+    locked_until = aware(attempt.locked_until) if attempt else None
     if locked_until and locked_until > now:
         raise HTTPException(status_code=429, detail="Too many sign-in attempts. Try again later.")
+    account_key = sha256(("acct|" + identifier.casefold()).encode()).hexdigest()
+    account_active = ACCOUNT_LOCKOUT_ENABLED and identifier != MASTER_ADMIN_MOBILE
+    account_attempt = db.get(LoginAttempt, account_key) if account_active else None
+    account_locked = aware(account_attempt.locked_until) if account_attempt else None
+    if account_locked and account_locked > now:
+        raise HTTPException(status_code=429, detail="This account is temporarily locked. Try again later.")
+
+    def reject(message: str, status_code: int = 401) -> JSONResponse:
+        needs_captcha = captcha_required(attempt)
+        return JSONResponse(
+            status_code=status_code,
+            content={"detail": message, "captchaRequired": needs_captcha} if needs_captcha else {"detail": message},
+        )
+
+    def record_failure() -> None:
+        nonlocal attempt, account_attempt
+        if attempt is None:
+            attempt = LoginAttempt(
+                key=attempt_key, failures=0, tier=0, permanent=False, remote=remote[:45], id_hint=identifier[-4:])
+            db.add(attempt)
+        register_login_failure(attempt, now)
+        if account_active:
+            if account_attempt is None:
+                account_attempt = LoginAttempt(
+                    key=account_key, failures=0, tier=0, permanent=False, remote="account", id_hint=identifier[-4:])
+                db.add(account_attempt)
+            account_attempt.failures += 1
+            if account_attempt.failures >= ACCOUNT_LOCKOUT_THRESHOLD:
+                account_attempt.failures = 0
+                account_attempt.locked_until = now + timedelta(minutes=ACCOUNT_LOCKOUT_MINUTES)
+                add_owner_alert(
+                    db, "account_lockout",
+                    f"Account ending {identifier[-4:]} locked for {ACCOUNT_LOCKOUT_MINUTES} min after repeated failed sign-ins.",
+                    identifier[-4:])
+        db.commit()
+
+    if captcha_required(attempt):
+        if not body.captchaToken:
+            return reject("Complete the security check to continue.")
+        if not verify_captcha(body.captchaToken, body.captchaAnswer):
+            record_failure()
+            if attempt.permanent:
+                raise HTTPException(status_code=423, detail="Sign-in is blocked for this connection. Contact the Supreme Owner to restore access.")
+            return reject("The security check answer was incorrect.")
     user = db.scalar(select(User).where((User.mobile == identifier) | (User.retail_id == identifier)))
     if user and user.role in TWO_FACTOR_ROLES:
         authorization = staff_authorization_for(db, user)
@@ -1112,14 +1405,12 @@ def login(
             user = None
     valid = verify_secret(body.password, user.password_hash if user else DUMMY_PASSWORD_HASH)
     if not user or not user.is_active or not user.password_hash or not valid:
-        if attempt is None:
-            attempt = LoginAttempt(key=attempt_key, failures=0)
-            db.add(attempt)
-        attempt.failures += 1
-        if attempt.failures >= LOGIN_FAILURE_LIMIT:
-            attempt.failures = 0
-            attempt.locked_until = now + LOGIN_LOCK_TIME
-        db.commit()
+        record_failure()
+        if attempt.permanent:
+            raise HTTPException(status_code=423, detail="Sign-in is blocked for this connection. Contact the Supreme Owner to restore access.")
+        locked_until = aware(attempt.locked_until)
+        if locked_until and locked_until > now:
+            raise HTTPException(status_code=429, detail="Too many sign-in attempts. Try again later.")
         # Pending status is revealed only to someone who knows both the application reference and its mobile.
         if not user and body.name.strip():
             application = db.get(Application, identifier[:80])
@@ -1128,9 +1419,11 @@ def login(
                 and compare_digest(application.mobile.encode(), body.name.strip().encode())
             ):
                 raise HTTPException(status_code=403, detail="Aapki application abhi admin review mein hai.")
-        raise HTTPException(status_code=401, detail="Invalid credentials or mobile number.")
+        return reject("Invalid credentials or mobile number.")
     if attempt:
         db.delete(attempt)
+    if account_attempt:
+        db.delete(account_attempt)
     upgrade_hash_if_needed(user, body.password)
     db.commit()
     if user.role in MFA_LOGIN_ROLES:
@@ -1388,6 +1681,8 @@ def owner_staff_action(
     if body.action == "approve":
         if item.status != "pending_owner_final_approval" or not user:
             raise HTTPException(status_code=409, detail="Only submitted setup requests can be approved.")
+        if body.role:
+            item.role, user.role = body.role, body.role
         item.status, item.approved_at = "ready_for_2fa", now
         user.is_active = True
     else:
@@ -1403,6 +1698,7 @@ def owner_staff_action(
         item.setup_submitted_at = None
     item.updated_at = now
     record_audit(db, owner, "staff_" + body.action, item.mobile[-4:], {"role": item.role})
+
     db.commit()
     return staff_data(item)
 
@@ -1448,10 +1744,11 @@ def create_support_ticket(
     ticket = {
         "id": "TKT-" + uuid4().hex[:10].upper(), "userId": user.id, "name": user.name,
         "mobile": user.mobile, "role": user.role, "category": body.category,
-        "subject": body.subject.strip(), "message": body.message.strip(),
-        "status": "open", "createdAt": utc_now().isoformat(),
+        "subject": body.subject.strip(), "message": body.message.strip(), "reference": body.reference,
+        "status": "open", "createdAt": utc_now().isoformat(), "reply": "", "updatedAt": utc_now().isoformat(),
     }
     save_record(db, SUPPORT_TICKETS_KEY, [ticket, *tickets][:1000])
+    add_owner_alert(db, "ticket", f"New {body.category} ticket from {user.name}: {body.subject.strip()}", ticket["id"])
     db.commit()
     return {"id": ticket["id"], "status": "open"}
 
@@ -1468,6 +1765,21 @@ def list_support_tickets(
     raise HTTPException(status_code=403, detail="You do not have permission for this operation.")
 
 
+@app.post("/api/support/tickets/{ticket_id}/read")
+def mark_ticket_reply_read(
+    ticket_id: str, user: User = Depends(role_required("retailer", "distributor")), db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    tickets = record_value(db, SUPPORT_TICKETS_KEY)
+    ticket = next((item for item in tickets if item.get("id") == ticket_id and item.get("userId") == user.id), None)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    if ticket.get("replyUnread"):
+        ticket["replyUnread"] = False
+        save_record(db, SUPPORT_TICKETS_KEY, tickets)
+        db.commit()
+    return {"read": True}
+
+
 @app.post("/api/support/tickets/{ticket_id}/close")
 def close_support_ticket(
     ticket_id: str,
@@ -1478,10 +1790,54 @@ def close_support_ticket(
     ticket = next((item for item in tickets if item.get("id") == ticket_id), None)
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found.")
-    ticket["status"], ticket["closedAt"] = "closed", utc_now().isoformat()
+    ticket["status"], ticket["closedAt"], ticket["updatedAt"] = "closed", utc_now().isoformat(), utc_now().isoformat()
     save_record(db, SUPPORT_TICKETS_KEY, tickets)
     db.commit()
     return {"status": "closed"}
+
+
+# (stage shown to the public, human label) per underlying status.
+TRACK_APPLICATION = {
+    "pending": ("Pending", "Under review"), "correction_required": ("Processing", "Correction required"),
+    "approved": ("Approved", "Approved"), "rejected": ("Rejected", "Rejected"),
+    "suspended": ("Rejected", "Suspended"), "blocked": ("Rejected", "Blocked"),
+}
+TRACK_TICKET = {"open": ("Pending", "Open"), "in_progress": ("Processing", "In progress"), "closed": ("Approved", "Resolved")}
+TRACK_TRANSACTION = {
+    "recorded": ("Pending", "Recorded"), "processing": ("Processing", "Processing"),
+    "success": ("Approved", "Successful"), "completed": ("Approved", "Completed"),
+    "failed": ("Rejected", "Failed"), "rejected": ("Rejected", "Rejected"), "refunded": ("Rejected", "Refunded"),
+}
+
+
+@app.post("/api/public/track")
+def public_track(body: TrackInput, request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Public status lookup. The mobile must match the record, so IDs alone reveal nothing."""
+    remote = request.client.host if request.client else "unknown"
+    if not TRACK_LIMITER.allow(remote):
+        raise HTTPException(status_code=429, detail="Too many lookups. Please wait a minute and try again.")
+    reference, mobile = body.reference.strip(), body.mobile
+    not_found = HTTPException(status_code=404, detail="No record found for these details.")
+
+    def result(kind: str, mapping: dict[str, tuple[str, str]], status: str, updated: str) -> dict[str, Any]:
+        stage, label = mapping.get(status, ("Processing", status.replace("_", " ").title()))
+        return {"kind": kind, "reference": reference, "stage": stage, "label": label, "updatedAt": updated}
+
+    application = db.get(Application, reference)
+    if application and compare_digest(application.mobile.encode(), mobile.encode()):
+        updated = application.payload.get("approvedAt") or application.payload.get("rejectedAt") or application.submitted_at.isoformat()
+        return result("Application", TRACK_APPLICATION, application.status, str(updated))
+    ticket = next((item for item in record_value(db, SUPPORT_TICKETS_KEY) if item.get("id") == reference.upper()), None)
+    if ticket and compare_digest(str(ticket.get("mobile", "")).encode(), mobile.encode()):
+        found = result("Support ticket", TRACK_TICKET, str(ticket.get("status", "open")), str(ticket.get("updatedAt") or ticket.get("createdAt", "")))
+        found["reference"] = reference.upper()
+        found["reply"] = str(ticket.get("reply", ""))
+        return found
+    transaction = db.scalar(select(TransactionRecord).where(TransactionRecord.reference == reference))
+    owner = db.get(User, transaction.user_id) if transaction else None
+    if transaction and owner and compare_digest(owner.mobile.encode(), mobile.encode()):
+        return result("Transaction", TRACK_TRANSACTION, transaction.status, transaction.created_at.isoformat())
+    raise not_found
 
 
 def sync_retail_profiles(db: Session, profiles: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -2644,6 +3000,56 @@ def transaction_data(row: TransactionRecord) -> dict[str, Any]:
     }
 
 
+@app.post("/api/transactions/{reference}/status")
+def update_transaction_status(
+    reference: str, body: TransactionStatusInput,
+    actor: User = Depends(role_required("master", "masteradmin")), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    row = db.scalar(select(TransactionRecord).where(TransactionRecord.reference == reference))
+    if not row:
+        raise HTTPException(status_code=404, detail="Transaction not found.")
+    if body.status not in TRANSACTION_TRANSITIONS.get(row.status, set()):
+        raise HTTPException(status_code=409, detail=f"A {row.status} transaction cannot move to {body.status}.")
+    history = [*(row.details or {}).get("history", []), {
+        "from": row.status, "to": body.status, "by": actor.id, "note": body.note.strip(),
+        "at": utc_now().isoformat(),
+    }]
+    previous = row.status
+    row.details = {**(row.details or {}), "history": history}
+    row.status = body.status
+    record_audit(db, actor, "transaction_status", reference, {"from": previous, "to": body.status})
+    db.commit()
+    return transaction_data(row)
+
+
+DEFAULT_COMMISSION_SLABS = [
+    {"service": "aeps", "label": "AEPS cash withdrawal", "minAmount": 100, "maxAmount": 999, "unit": "flat",
+     "retailerRate": 1.0, "distributorRate": 0.2},
+    {"service": "aeps", "label": "AEPS cash withdrawal", "minAmount": 1000, "maxAmount": 1999, "unit": "flat",
+     "retailerRate": 5.0, "distributorRate": 1.0},
+    {"service": "aeps", "label": "AEPS cash withdrawal", "minAmount": 2000, "maxAmount": 10000, "unit": "flat",
+     "retailerRate": 10.0, "distributorRate": 2.0},
+    {"service": "micro_atm", "label": "Micro ATM withdrawal", "minAmount": 100, "maxAmount": 10000, "unit": "percent",
+     "retailerRate": 0.3, "distributorRate": 0.05},
+    {"service": "bill_payment", "label": "Electricity / utility bill", "minAmount": 1, "maxAmount": 50000,
+     "unit": "percent", "retailerRate": 0.5, "distributorRate": 0.1},
+    {"service": "bill_payment", "label": "Mobile / DTH recharge", "minAmount": 1, "maxAmount": 10000,
+     "unit": "percent", "retailerRate": 2.0, "distributorRate": 0.3},
+]
+
+
+@app.get("/api/commission-slabs")
+def commission_slabs(
+    user: User = Depends(role_required("master", "masteradmin", "subadmin", "retailer", "distributor")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    stored = record_value(db, COMMISSION_KEY)
+    slabs = stored or DEFAULT_COMMISSION_SLABS
+    if user.role == "retailer":
+        slabs = [{key: value for key, value in slab.items() if key != "distributorRate"} for slab in slabs]
+    return {"slabs": slabs, "published": bool(stored), "role": user.role}
+
+
 @app.post("/api/service-enquiries")
 def create_service_enquiry(body: dict[str, Any], db: Session = Depends(get_db)) -> dict[str, str]:
     name = str(body.get("name", "")).strip()[:80]
@@ -2726,12 +3132,13 @@ def dashboard_page() -> FileResponse:
     return FileResponse(BASE_DIR / "dashboard.html", headers={"Cache-Control": "no-store"})
 
 
-class AssistantChatRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class AssistantChatRequest(InputModel):
+    sql_checks = False  # Natural-language questions may contain apostrophes and dashes.
     message: str = Field(max_length=2000)
 
 
 class PublicAssistantRequest(InputModel):
+    sql_checks = False
     message: str = Field(max_length=1000)
 
 
@@ -2825,6 +3232,33 @@ owner_only = role_required("master")
 OWNER_PAGE_HEADERS = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"}
 
 
+@app.put("/api/supreme/commission-slabs")
+def publish_commission_slabs(
+    body: CommissionInput, owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if any(0 < row.maxAmount < row.minAmount for row in body.slabs):
+        raise HTTPException(status_code=422, detail="A slab maximum cannot be below its minimum.")
+    save_record(db, COMMISSION_KEY, [row.model_dump() for row in body.slabs])
+    record_audit(db, owner, "commission_publish", COMMISSION_KEY, {"rows": len(body.slabs)})
+    db.commit()
+    return {"published": True, "rows": len(body.slabs)}
+
+
+@app.get("/api/supreme/alerts")
+def supreme_alerts(_: User = Depends(owner_only), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return {"alerts": record_value(db, OWNER_ALERTS_KEY)[:50]}
+
+
+@app.post("/api/supreme/alerts/read")
+def supreme_alerts_read(_: User = Depends(owner_only), db: Session = Depends(get_db)) -> dict[str, bool]:
+    alerts = record_value(db, OWNER_ALERTS_KEY)
+    for alert in alerts:
+        alert["read"] = True
+    save_record(db, OWNER_ALERTS_KEY, alerts)
+    db.commit()
+    return {"read": True}
+
+
 def owner_console_file(request: Request, db: Session, filename: str) -> FileResponse | RedirectResponse:
     try:
         user = current_user(request, db)
@@ -2852,10 +3286,12 @@ class OwnerPasswordInput(InputModel):
 
 
 class AiConfigInput(InputModel):
+    scan_text = False  # Owner-authored assistant prompts may legitimately contain any punctuation.
     config: dict[str, Any]
 
 
 class AiTestInput(InputModel):
+    scan_text = False
     channel: str = Field(pattern=r"^(public|portal)$")
     role: str = Field(default="retailer", pattern=r"^(retailer|distributor|subadmin|masteradmin|master)$")
     message: str = Field(max_length=1000)
@@ -2881,12 +3317,44 @@ def supreme_overview(_: User = Depends(owner_only), db: Session = Depends(get_db
         "activeSessions": db.scalar(
             select(func.count()).select_from(PortalSession).where(PortalSession.expires_at > now)) or 0,
         "auditEntries": count_rows(db, AuditLog),
+        "openTickets": sum(1 for item in record_value(db, SUPPORT_TICKETS_KEY) if item.get("status") != "closed"),
+        "unreadAlerts": sum(1 for item in record_value(db, OWNER_ALERTS_KEY) if not item.get("read")),
         "ai": {
             "publicEnabled": config["public"]["enabled"], "portalEnabled": config["portal"]["enabled"],
             "configVersion": meta["version"],
         },
         "serverTime": now.isoformat(),
     }
+
+
+@app.get("/api/supreme/tickets")
+def supreme_tickets(
+    status: str = "", _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if status and status not in TICKET_STATUSES:
+        raise HTTPException(status_code=422, detail="Unknown ticket status.")
+    tickets = [item for item in record_value(db, SUPPORT_TICKETS_KEY) if not status or item.get("status") == status]
+    return {"tickets": tickets}
+
+
+@app.post("/api/supreme/tickets/{ticket_id}/update")
+def supreme_ticket_update(
+    ticket_id: str, body: TicketUpdateInput, owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    tickets = record_value(db, SUPPORT_TICKETS_KEY)
+    ticket = next((item for item in tickets if item.get("id") == ticket_id), None)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found.")
+    now = utc_now().isoformat()
+    reply = body.reply.strip()
+    if reply and reply != ticket.get("reply", ""):
+        ticket["replyUnread"] = True
+    ticket["status"], ticket["reply"], ticket["updatedAt"] = body.status, reply, now
+    ticket["closedAt"] = now if body.status == "closed" else ""
+    save_record(db, SUPPORT_TICKETS_KEY, tickets)
+    record_audit(db, owner, "ticket.update", ticket_id, {"status": body.status})
+    db.commit()
+    return {"ticket": ticket}
 
 
 LIST_ROLE_CATEGORIES = {"retailer", "distributor", "masteradmin", "subadmin"}
@@ -2988,6 +3456,14 @@ def supreme_security(_: User = Depends(owner_only), db: Session = Depends(get_db
             select(func.count()).select_from(PortalSession).where(PortalSession.expires_at > now)) or 0,
         "activeLockouts": db.scalar(
             select(func.count()).select_from(LoginAttempt).where(LoginAttempt.locked_until > now)) or 0,
+        "lockoutPolicy": " -> ".join(
+            f"{limit} fails: " + ("permanent block" if duration is None else f"{int(duration.total_seconds() // 60)} min")
+            for limit, duration in LOGIN_LOCKOUT_TIERS),
+        "captchaAfterFailures": CAPTCHA_AFTER_FAILURES,
+        "blocked": [
+            {"ip": row.remote, "identifierHint": row.id_hint, "blockedAt": row.blocked_at.isoformat() if row.blocked_at else ""}
+            for row in db.scalars(select(LoginAttempt).where(LoginAttempt.permanent.is_(True)).limit(100))
+        ],
         "staffWithoutTwoFactor": db.scalar(
             select(func.count()).select_from(User).where(
                 User.role.in_(sorted(TWO_FACTOR_ROLES)), User.is_active.is_(True), User.totp_enrolled.is_(False))) or 0,
@@ -3020,6 +3496,30 @@ def supreme_clear_lockouts(
     record_audit(db, owner, "lockouts_clear", "all", {"cleared": cleared})
     db.commit()
     return {"cleared": cleared}
+
+
+@app.post("/api/supreme/security/unlock")
+def supreme_unlock(
+    body: UnlockInput, owner: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    # Attempts are keyed by a hash of client IP + identifier, so both are needed to find the record.
+    identifier = normalized_identifier(body.identifier)
+    removed = 0
+    if body.ip.strip():
+        key = sha256((body.ip.strip() + "|" + identifier.casefold()).encode()).hexdigest()
+        attempt = db.get(LoginAttempt, key)
+        if attempt:
+            db.delete(attempt)
+            removed += 1
+    account = db.get(LoginAttempt, sha256(("acct|" + identifier.casefold()).encode()).hexdigest())
+    if account:
+        db.delete(account)
+        removed += 1
+    if not removed:
+        raise HTTPException(status_code=404, detail="No lockout record found for this identifier and IP.")
+    record_audit(db, owner, "lockout_unlock", identifier[-4:], {})
+    db.commit()
+    return {"unlocked": True}
 
 
 @app.post("/api/supreme/staff/{staff_id}/sign-out")
