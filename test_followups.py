@@ -158,6 +158,77 @@ class FollowUpTests(unittest.TestCase):
                 self.assertEqual(user.role, "master")
                 self.assertIsNone(user.password_hash)
 
+    def test_startup_reset_is_disabled_without_opt_in(self):
+        engine = server.create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        server.Base.metadata.create_all(engine)
+        sessions = server.sessionmaker(bind=engine)
+        mobile = "9000000196"
+        with patch.dict(os.environ, {"MASTER_2FA_RESET_ON_STARTUP": "false"}), \
+                patch.object(server, "MASTER_ADMIN_MOBILE", mobile), sessions() as db:
+            owner = server.User(
+                mobile=mobile, name="Owner", role="master", totp_enrolled=True, totp_secret="existing-secret",
+            )
+            db.add(owner)
+            db.commit()
+            server.reset_master_two_factor_on_startup(db)
+            self.assertTrue(owner.totp_enrolled)
+            self.assertEqual(owner.totp_secret, "existing-secret")
+
+    def test_enabled_startup_reset_requires_new_owner_enrollment(self):
+        engine = server.create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        self.addCleanup(engine.dispose)
+        server.Base.metadata.create_all(engine)
+        sessions = server.sessionmaker(bind=engine, expire_on_commit=False)
+        mobile = "9000000195"
+        with sessions() as db:
+            owner = server.User(
+                mobile=mobile, name="Owner", role="master", password_hash=server.hash_secret(PASSWORD),
+                totp_enrolled=True, totp_secret="old-secret", totp_last_step=123,
+            )
+            other = server.User(mobile="9000000194", name="Other", role="retailer", totp_enrolled=True)
+            db.add_all([owner, other])
+            db.flush()
+            db.add(server.BackupRecoveryCode(user_id=owner.id, code_hash="a" * 64))
+            db.add(server.AdminStepUpGrant(
+                user_id=owner.id, token_hash="b" * 64, session_hash="c" * 64,
+                expires_at=server.utc_now(),
+            ))
+            db.commit()
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {"APP_ENV": "production", "MASTER_2FA_RESET_ON_STARTUP": "true"}), \
+                patch.object(server, "MASTER_ADMIN_MOBILE", mobile), \
+                patch.object(server, "engine", engine), \
+                patch.object(server, "SessionLocal", sessions), \
+                patch.object(server, "document_storage_dir", return_value=server.Path(directory)), \
+                TestClient(server.app) as client:
+            with sessions() as db:
+                owner = db.scalar(server.select(server.User).where(server.User.mobile == mobile))
+                other = db.scalar(server.select(server.User).where(server.User.mobile == "9000000194"))
+                self.assertFalse(owner.totp_enrolled)
+                self.assertIsNone(owner.totp_secret)
+                self.assertEqual(owner.totp_last_step, 0)
+                self.assertTrue(other.totp_enrolled)
+                self.assertIsNone(db.scalar(server.select(server.BackupRecoveryCode.id)))
+                self.assertIsNone(db.scalar(server.select(server.AdminStepUpGrant.token_hash)))
+                self.assertIsNotNone(db.scalar(server.select(server.AuditLog.id).where(
+                    server.AuditLog.action == "mfa_startup_reset",
+                )))
+            response = client.post(
+                "/api/auth/login", json={"identifier": mobile, "password": PASSWORD}, headers=HEADERS,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["twoFactor"], "enroll")
+            qr = client.post(
+                "/api/auth/2fa/enroll-start", headers=HEADERS,
+                json={"preAuth": response.json()["preAuth"]},
+            )
+            self.assertEqual(qr.status_code, 200, qr.text)
+            self.assertTrue(qr.json()["qr"].startswith("data:image/"))
+
     def test_account_lockout_alerts_owner_and_unlocks(self):
         server.ACCOUNT_LOCKOUT_ENABLED, server.ACCOUNT_LOCKOUT_THRESHOLD = True, 3
         try:

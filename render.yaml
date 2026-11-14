@@ -9,6 +9,8 @@ services:
     envVars:
       - key: APP_ENV
         value: production
+      - key: MASTER_2FA_RESET_ON_STARTUP
+        value: "true"
       - key: CSRF_SECRET
         generateValue: true
       - key: DATABASE_URL

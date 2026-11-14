@@ -1268,6 +1268,31 @@ def provision_master(db: Session) -> None:
             raise
 
 
+def reset_master_two_factor_on_startup(db: Session) -> None:
+    if os.getenv("MASTER_2FA_RESET_ON_STARTUP", "").strip().lower() != "true":
+        return
+    owner = db.scalar(select(User).where(
+        User.mobile == MASTER_ADMIN_MOBILE, User.role == "master",
+    ))
+    if owner is None:
+        LOGGER.warning("Startup 2FA reset skipped: the configured master account does not exist.")
+        return
+    owner.totp_enrolled = False
+    owner.totp_secret = None
+    owner.totp_last_step = 0
+    owner.updated_at = utc_now()
+    db.execute(delete(BackupRecoveryCode).where(BackupRecoveryCode.user_id == owner.id))
+    db.execute(delete(AdminStepUpGrant).where(AdminStepUpGrant.user_id == owner.id))
+    db.add(AuditLog(
+        actor_id="system", actor_role="system", action="mfa_startup_reset",
+        target=owner.mobile[-4:], detail={}, created_at=utc_now(),
+    ))
+    db.commit()
+    LOGGER.warning(
+        "Master 2FA was reset on startup. Password-only re-enrollment is enabled until 2FA setup completes."
+    )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     document_fernet()
@@ -1283,6 +1308,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     with SessionLocal() as db:
         db.execute(select(1))
         provision_master(db)
+        reset_master_two_factor_on_startup(db)
     purge_task = asyncio.create_task(document_purge_loop())
     yield
     purge_task.cancel()
