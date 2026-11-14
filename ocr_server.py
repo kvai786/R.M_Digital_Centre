@@ -29,6 +29,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, delete, func, inspect, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
@@ -1247,6 +1248,26 @@ def application_values(db: Session) -> list[dict[str, Any]]:
     return [dict(row.payload) for row in rows]
 
 
+def provision_master(db: Session) -> None:
+    if os.getenv("APP_ENV") != "production":
+        return
+    if db.scalar(select(User.id).where(User.role == "master").limit(1)):
+        return
+    token = os.getenv("RM_MASTER_BOOTSTRAP_TOKEN", "")
+    if len(token) < 32:
+        LOGGER.warning("Master provisioning skipped: configure a bootstrap token of at least 32 characters.")
+        return
+    if db.scalar(select(User.id).where(User.mobile == MASTER_ADMIN_MOBILE)):
+        raise RuntimeError("Cannot provision the master account: the configured mobile belongs to another user.")
+    db.add(User(mobile=MASTER_ADMIN_MOBILE, name="Rahamtulla Mondal", role="master"))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if not db.scalar(select(User.id).where(User.role == "master").limit(1)):
+            raise
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     document_fernet()
@@ -1261,6 +1282,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     ensure_schema_columns()
     with SessionLocal() as db:
         db.execute(select(1))
+        provision_master(db)
     purge_task = asyncio.create_task(document_purge_loop())
     yield
     purge_task.cancel()
@@ -1403,6 +1425,8 @@ def auth_lookup(body: AuthInput, request: Request, db: Session = Depends(get_db)
         return {"step": "bootstrap", "identifier": identifier}
     if user is not None and not user.is_active:
         raise HTTPException(status_code=403, detail=ACCESS_DENIED_MESSAGE)
+    if user is not None and user.role == "master" and user.mobile == MASTER_ADMIN_MOBILE and user.password_hash is None:
+        return {"step": "bootstrap", "identifier": identifier}
     if user is None:
         pending = db.scalar(select(StaffAuthorization).where(
             StaffAuthorization.mobile == identifier,

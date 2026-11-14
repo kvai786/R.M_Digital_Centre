@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
+from sqlalchemy.pool import StaticPool
 
 _TMP = tempfile.TemporaryDirectory()
 os.environ.update({
@@ -70,6 +71,92 @@ class FollowUpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["twoFactor"], "enroll")
         self.assertNotIn("user", response.json())
+
+    def test_provisioned_master_uses_secure_bootstrap_and_is_preserved(self):
+        engine = server.create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        self.addCleanup(engine.dispose)
+        server.Base.metadata.create_all(engine)
+        sessions = server.sessionmaker(bind=engine, expire_on_commit=False)
+        mobile = "9000000198"
+        token = "test-bootstrap-token-" + "x" * 32
+
+        def test_db():
+            with sessions() as db:
+                yield db
+
+        server.app.dependency_overrides[server.get_db] = test_db
+        with patch.dict(os.environ, {"APP_ENV": "production", "RM_MASTER_BOOTSTRAP_TOKEN": token}), \
+                patch.object(server, "MASTER_ADMIN_MOBILE", mobile):
+            with sessions() as db:
+                server.provision_master(db)
+                user = db.scalar(server.select(server.User).where(server.User.mobile == mobile))
+                self.assertEqual(user.role, "master")
+                self.assertIsNone(user.password_hash)
+                self.assertFalse(user.totp_enrolled)
+
+            lookup = self.client.post("/api/auth/lookup", headers=HEADERS, json={"identifier": mobile})
+            self.assertEqual(lookup.json()["step"], "bootstrap")
+            rejected = self.client.post("/api/auth/bootstrap", headers=HEADERS, json={
+                "identifier": mobile, "password": PASSWORD, "bootstrapToken": "incorrect",
+            })
+            self.assertEqual(rejected.status_code, 403)
+            accepted = self.client.post("/api/auth/bootstrap", headers=HEADERS, json={
+                "identifier": mobile, "password": PASSWORD, "bootstrapToken": token,
+            })
+            self.assertEqual(accepted.status_code, 200, accepted.text)
+            self.assertEqual(accepted.json()["twoFactor"], "enroll")
+
+            with sessions() as db:
+                user = db.scalar(server.select(server.User).where(server.User.mobile == mobile))
+                user.totp_secret = "existing-secret"
+                user.totp_enrolled = True
+                password_hash = user.password_hash
+                db.commit()
+                server.provision_master(db)
+                db.refresh(user)
+                self.assertEqual(user.password_hash, password_hash)
+                self.assertEqual(user.totp_secret, "existing-secret")
+                self.assertTrue(user.totp_enrolled)
+                self.assertEqual(len(db.scalars(server.select(server.User)).all()), 1)
+
+    def test_master_provisioning_requires_token_and_rejects_mobile_collision(self):
+        engine = server.create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        server.Base.metadata.create_all(engine)
+        sessions = server.sessionmaker(bind=engine)
+        mobile = "9000000199"
+        with patch.dict(os.environ, {"APP_ENV": "production", "RM_MASTER_BOOTSTRAP_TOKEN": ""}), \
+                patch.object(server, "MASTER_ADMIN_MOBILE", mobile), sessions() as db:
+            server.provision_master(db)
+            self.assertIsNone(db.scalar(server.select(server.User.id)))
+            db.add(server.User(mobile=mobile, name="Existing Retailer", role="retailer"))
+            db.commit()
+            with patch.dict(os.environ, {"RM_MASTER_BOOTSTRAP_TOKEN": "x" * 32}):
+                with self.assertRaisesRegex(RuntimeError, "belongs to another user"):
+                    server.provision_master(db)
+
+    def test_production_startup_provisions_master_in_configured_database(self):
+        engine = server.create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        self.addCleanup(engine.dispose)
+        sessions = server.sessionmaker(bind=engine, expire_on_commit=False)
+        mobile = "9000000197"
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {"APP_ENV": "production", "RM_MASTER_BOOTSTRAP_TOKEN": "x" * 32}), \
+                patch.object(server, "MASTER_ADMIN_MOBILE", mobile), \
+                patch.object(server, "engine", engine), \
+                patch.object(server, "SessionLocal", sessions), \
+                patch.object(server, "document_fernet"), \
+                patch.object(server, "document_storage_dir", return_value=server.Path(directory)), \
+                TestClient(server.app):
+            with sessions() as db:
+                user = db.scalar(server.select(server.User).where(server.User.mobile == mobile))
+                self.assertIsNotNone(user)
+                self.assertEqual(user.role, "master")
+                self.assertIsNone(user.password_hash)
 
     def test_account_lockout_alerts_owner_and_unlocks(self):
         server.ACCOUNT_LOCKOUT_ENABLED, server.ACCOUNT_LOCKOUT_THRESHOLD = True, 3
