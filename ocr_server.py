@@ -2744,11 +2744,25 @@ def activate_retailer(
     return {"user": session_user_data(user)}
 
 
-def distributor_card(payload: dict[str, Any]) -> dict[str, Any]:
+def mask_name(value: str) -> str:
+    parts: list[str] = []
+    for word in value.split():
+        visible = min(2, max(0, len(word) - 1))
+        parts.append(word[:visible] + "x" * (len(word) - visible))
+    return " ".join(parts)
+
+
+def mask_mobile(value: str) -> str:
+    return "**" + value[-2:] if len(value) >= 2 else ("**" if value else "")
+
+
+def distributor_card(payload: dict[str, Any], *, mask_contact: bool = False) -> dict[str, Any]:
+    name = str(payload.get("name", ""))
+    mobile = str(payload.get("mobile", ""))
     return {
         "applicationId": payload.get("id", ""),
-        "name": payload.get("name", ""),
-        "mobile": payload.get("mobile", ""),
+        "name": mask_name(name) if mask_contact else name,
+        "mobile": mask_mobile(mobile) if mask_contact else mobile,
         "email": payload.get("email", ""),
         "distributorId": payload.get("generatedId", ""),
         "status": payload.get("status", ""),
@@ -2778,7 +2792,7 @@ def retailer_profile(
     if own and own.distributor_application_id:
         row = db.get(Application, own.distributor_application_id)
         if row:
-            distributor = distributor_card(row.payload)
+            distributor = distributor_card(row.payload, mask_contact=True)
     official = {
         "portalId": own.payload.get("officialPortalId", ""),
         "credentials": own.payload.get("officialCredentials", ""),
@@ -2816,8 +2830,8 @@ def distributor_retailers(
         account = accounts.get(row.mobile)
         count, total = totals.get(account.id, (0, 0)) if account else (0, 0)
         retailers.append({
-            "applicationId": row.id, "name": row.payload.get("name", ""),
-            "business": row.payload.get("business", ""), "mobile": row.mobile,
+            "applicationId": row.id, "name": mask_name(str(row.payload.get("name", ""))),
+            "business": row.payload.get("business", ""), "mobile": mask_mobile(row.mobile),
             "city": row.payload.get("city", ""), "pin": row.payload.get("operationalPin", ""),
             "status": row.status, "retailerId": row.payload.get("generatedId", ""),
             "active": bool(row.status == "approved" and account and account.is_active),
@@ -2854,10 +2868,14 @@ def partner_summary(row: Application) -> dict[str, Any]:
 
 @app.get("/api/admin/network")
 def admin_network(
-    _: User = Depends(role_required("master", "masteradmin", "subadmin")), db: Session = Depends(get_db),
+    user: User = Depends(role_required("master", "masteradmin", "subadmin")), db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     rows = list(db.scalars(select(Application).order_by(Application.submitted_at.desc())))
     partners = [partner_summary(row) for row in rows]
+    if user.role == "subadmin":
+        for item in partners:
+            item["name"] = mask_name(str(item["name"]))
+            item["mobile"] = mask_mobile(str(item["mobile"]))
     distributors = [item for item in partners if item["role"] == "distributor"]
     for item in distributors:
         mine = [r for r in partners if r["role"] == "retailer" and r["distributorApplicationId"] == item["applicationId"]]
