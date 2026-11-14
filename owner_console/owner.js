@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const GREETING = "Welcome back, Boss. R.M. Digital Centre master panel is fully operational.";
+    const GREETING = "Namaskar Sir. R.M. Digital Centre master panel is fully operational.";
     const PENDING_WELCOME_KEY = "rm-demo-pending-welcome";
     const ROLES = [
         ["retailer", "Retailer"], ["distributor", "Distributor"], ["subadmin", "Sub-Admin"],
@@ -20,7 +20,7 @@
         const headers = { Accept: "application/json" };
         if (options.body !== undefined) headers["Content-Type"] = "application/json";
         if (method !== "GET") headers["X-CSRF-Token"] = csrfToken();
-        const response = await fetch(path, {
+        let response = await fetch(path, {
             method, headers, credentials: "same-origin", cache: "no-store",
             body: options.body === undefined ? undefined : JSON.stringify(options.body),
         });
@@ -28,7 +28,20 @@
             window.location.assign("/login.html");
             throw new Error("Session expired.");
         }
-        const data = await response.json().catch(() => ({}));
+        let data = await response.json().catch(() => ({}));
+        if (response.status === 428 && data.stepUpRequired) {
+            if (typeof window.requestAdminStepUp !== "function") {
+                throw new Error("This action requires fresh administrator verification.");
+            }
+            const token = await window.requestAdminStepUp();
+            if (!token) throw new Error("Administrator verification was cancelled.");
+            headers["X-Admin-Step-Up"] = token;
+            response = await fetch(path, {
+                method, headers, credentials: "same-origin", cache: "no-store",
+                body: options.body === undefined ? undefined : JSON.stringify(options.body),
+            });
+            data = await response.json().catch(() => ({}));
+        }
         if (!response.ok) {
             const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ") : data.detail;
             throw new Error(detail || "Request failed.");
@@ -74,25 +87,30 @@
     }
 
     /* Voice greeting */
-    function pickVoice() {
-        const voices = window.speechSynthesis.getVoices();
-        return voices.find((v) => v.lang === "en-IN") || voices.find((v) => v.lang.startsWith("en")) || null;
-    }
-
-    function speakGreeting(onBlocked) {
-        if (!("speechSynthesis" in window)) { onBlocked && onBlocked(); return; }
-        const synth = window.speechSynthesis;
-        synth.cancel();
-        const utterance = new SpeechSynthesisUtterance(GREETING);
-        utterance.lang = "en-IN";
-        utterance.rate = 0.95;
-        const voice = pickVoice();
-        if (voice) utterance.voice = voice;
+    async function speakGreeting(onBlocked) {
+        if (!window.RMVoice || !window.RMVoice.supported()) {
+            if (onBlocked) onBlocked();
+            return;
+        }
         let started = false;
-        utterance.onstart = () => { started = true; $("oc-greeting-banner").hidden = true; };
-        utterance.onerror = () => { if (!started && onBlocked) onBlocked(); };
-        synth.speak(utterance);
-        if (onBlocked) setTimeout(() => { if (!started) onBlocked(); }, 1500);
+        let blocked = false;
+        const showBlocked = () => {
+            if (started || blocked || !onBlocked) return;
+            blocked = true;
+            onBlocked();
+        };
+        try {
+            const played = await window.RMVoice.speak(GREETING, {
+                endpoint: "/api/assistant/owner-greeting",
+                onStart: () => { started = true; $("oc-greeting-banner").hidden = true; },
+                onEnd: showBlocked,
+            });
+            if (!played) showBlocked();
+            if (onBlocked) setTimeout(showBlocked, 1500);
+        } catch (error) {
+            console.error("The owner greeting could not be played.", error);
+            showBlocked();
+        }
     }
 
     function greetAfterLogin(owner) {
@@ -546,11 +564,24 @@
     }
 
     async function apiUpload(path, formData) {
-        const response = await fetch(path, {
-            method: "POST", headers: { Accept: "application/json", "X-CSRF-Token": csrfToken() },
+        let headers = { Accept: "application/json", "X-CSRF-Token": csrfToken() };
+        let response = await fetch(path, {
+            method: "POST", headers,
             credentials: "same-origin", body: formData,
         });
-        const data = await response.json().catch(() => ({}));
+        let data = await response.json().catch(() => ({}));
+        if (response.status === 428 && data.stepUpRequired) {
+            if (typeof window.requestAdminStepUp !== "function") {
+                throw new Error("This action requires fresh administrator verification.");
+            }
+            const token = await window.requestAdminStepUp();
+            if (!token) throw new Error("Administrator verification was cancelled.");
+            headers = Object.assign({}, headers, { "X-Admin-Step-Up": token });
+            response = await fetch(path, {
+                method: "POST", headers, credentials: "same-origin", body: formData,
+            });
+            data = await response.json().catch(() => ({}));
+        }
         if (!response.ok) {
             const detail = Array.isArray(data.detail) ? data.detail.map((d) => d.msg).join("; ") : data.detail;
             throw new Error(detail || "Upload failed.");
@@ -676,6 +707,9 @@
 
         state.loaded.add("overview");
         loadOverview();
+        window.setInterval(() => {
+            if (!document.hidden) loadAlerts();
+        }, 60000);
         greetAfterLogin(me.user);
     }
 

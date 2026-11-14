@@ -19,14 +19,16 @@ import secrets
 import threading
 from typing import Any, AsyncGenerator, ClassVar
 import unicodedata
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import uuid4
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as URLRequest, urlopen
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, func, inspect, select, text
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, create_engine, delete, func, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
@@ -46,6 +48,12 @@ from brand_documents import VIEWER_CSP, is_watermarkable, watermark_viewer_html
 
 ASSISTANT_LIMITER = RateLimiter(limit=15, window_seconds=60)
 PUBLIC_ASSISTANT_LIMITER = RateLimiter(limit=10, window_seconds=60)
+PUBLIC_SPEECH_LIMITER = RateLimiter(limit=5, window_seconds=60)
+OWNER_SPEECH_LIMITER = RateLimiter(limit=5, window_seconds=60)
+SPEECH_GLOBAL_LIMITER = RateLimiter(limit=30, window_seconds=60)
+SPEECH_TOKEN_TTL_SECONDS = 90
+SPEECH_MAX_AUDIO_BYTES = 3 * 1024 * 1024
+OWNER_GREETING_TEXT = "Namaskar Sir. R.M. Digital Centre master panel is fully operational."
 BASE_DIR = Path(__file__).resolve().parent
 OWNER_CONSOLE_DIR = BASE_DIR / "owner_console"
 OWNER_CONSOLE_ASSETS = {"owner.js", "owner.css"}
@@ -102,6 +110,7 @@ TWO_FACTOR_ROLES = {"masteradmin", "subadmin"}
 # Every staff identity that must pass TOTP before a session is issued; the owner has no staff authorization row.
 MFA_LOGIN_ROLES = {"master"} | TWO_FACTOR_ROLES
 PREAUTH_LIFETIME_SECONDS = 300
+ADMIN_STEP_UP_LIFETIME = timedelta(minutes=5)
 TOTP_ISSUER = "R.M Digital Centre"
 HELPLINE_KEY = "helpline"
 SUPPORT_TICKETS_KEY = "rm-support-tickets"
@@ -110,13 +119,9 @@ PENDING_KYC_RETENTION_DAYS = 30
 REVIEW_IN_PROGRESS_STATUSES = ("pending", "correction_required")
 KYC_PURGE_STATUSES = {"approved", "rejected", "blocked"}
 CSRF_COOKIE_NAME = "rm_csrf"
-CSRF_EXEMPT_PATHS = {
-    "/api/auth/login", "/api/auth/lookup", "/api/auth/setup", "/api/auth/bootstrap",
-    "/api/auth/recover", "/api/retailer/activate", "/api/auth/staff-setup",
-    "/api/auth/2fa/enroll-start", "/api/auth/2fa/enroll-verify", "/api/auth/2fa/verify",
-    "/api/applications", "/api/service-enquiries", "/api/scan-document", "/api/public/assistant/chat",
-    "/api/public/track",
-}
+LOGIN_RATE_LIMITER = RateLimiter(limit=5, window_seconds=60)
+API_RATE_LIMITER = RateLimiter(limit=120, window_seconds=60)
+SERVICE_ENQUIRY_LIMITER = RateLimiter(limit=5, window_seconds=60)
 TRACK_LIMITER = RateLimiter(limit=8, window_seconds=60)
 TICKET_STATUSES = ("open", "in_progress", "closed")
 OWNER_ALERTS_KEY = "rm-owner-alerts"
@@ -138,7 +143,8 @@ _application_hits: dict[str, list[datetime]] = {}
 STATIC_FILES = {
     "index.html", "login.html", "register.html", "admin.html", "retailer.html",
     "dashboard.html", "dashboard.css", "dashboard.js",
-    "styles.css", "app.js", "home-services.js", "manifest.json", "sw.js", "icon.svg",
+    "styles.css", "app.js", "admin-step-up.js", "admin-step-up.css",
+    "home-services.js", "manifest.json", "sw.js", "icon.svg",
     "icon-192.png", "icon-512.png", "assistant.css", "public-assistant.js", "portal-assistant.js",
         "rm-voice.js", "track.html", "track.js", "commission.html", "commission.js",
     "compliance.html", "compliance.js", "credentials.json", "terms.html", "privacy.html", "refund.html",
@@ -254,6 +260,22 @@ class User(Base):
     totp_last_step: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class BackupRecoveryCode(Base):
+    __tablename__ = "backup_recovery_codes"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: uuid4().hex)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class AdminStepUpGrant(Base):
+    __tablename__ = "admin_step_up_grants"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    session_hash: Mapped[str] = mapped_column(String(64), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class StaffAuthorization(Base):
@@ -475,7 +497,28 @@ class StaffSetupInput(InputModel):
 
 class TwoFactorInput(InputModel):
     preAuth: str = Field(min_length=20, max_length=300)
-    code: str = Field(default="", max_length=8)
+    code: str = Field(default="", max_length=32)
+
+
+class OwnerStepUpInput(InputModel):
+    password: str = Field(min_length=1, max_length=128)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class ServiceEnquiryInput(InputModel):
+    sql_checks: ClassVar[bool] = False
+    name: str = Field(min_length=2, max_length=80)
+    mobile: str = Field(pattern=r"^\d{10}$")
+    service: str = Field(min_length=2, max_length=80)
+    message: str = Field(default="", max_length=1000)
+
+    @field_validator("name", "service")
+    @classmethod
+    def normalize_required_text(cls, value: str, info: ValidationInfo) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError(f"{info.field_name} must contain at least 2 characters.")
+        return normalized
 
 
 class StaffAuthorizationInput(InputModel):
@@ -961,6 +1004,41 @@ def check_totp(user: User, code: str) -> bool:
     return False
 
 
+def create_backup_codes(db: Session, user: User) -> list[str]:
+    db.execute(delete(BackupRecoveryCode).where(BackupRecoveryCode.user_id == user.id))
+    codes = []
+    for _ in range(5):
+        raw_code = secrets.token_hex(12).upper()
+        code = "-".join(raw_code[index:index + 4] for index in range(0, len(raw_code), 4))
+        code_hash = hmac_new(csrf_secret(), b"backup-code|" + raw_code.encode(), sha256).hexdigest()
+        db.add(BackupRecoveryCode(user_id=user.id, code_hash=code_hash))
+        codes.append(code)
+    return codes
+
+
+def consume_backup_code(db: Session, user: User, code: str) -> bool:
+    if user.role != "master":
+        return False
+    raw_code = re.sub(r"[-\s]", "", code).upper()
+    if not re.fullmatch(r"[0-9A-F]{24}", raw_code):
+        return False
+    code_hash = hmac_new(csrf_secret(), b"backup-code|" + raw_code.encode(), sha256).hexdigest()
+    row = db.scalar(select(BackupRecoveryCode).where(
+        BackupRecoveryCode.user_id == user.id, BackupRecoveryCode.code_hash == code_hash,
+    ))
+    if not row:
+        return False
+    result = db.execute(delete(BackupRecoveryCode).where(
+        BackupRecoveryCode.id == row.id, BackupRecoveryCode.code_hash == code_hash,
+    ))
+    if result.rowcount != 1:
+        db.rollback()
+        return False
+    record_audit(db, user, "mfa_backup_success", user.mobile[-4:])
+    db.commit()
+    return True
+
+
 def qr_data_uri(content: str) -> str:
     image = qrcode.make(content)
     buffer = BytesIO()
@@ -1203,18 +1281,87 @@ async def validation_error_handler(_: Request, error: RequestValidationError) ->
     return JSONResponse(status_code=422, content={"detail": f"Invalid {field}: {reason}."})
 
 
+def is_owner_sensitive_mutation(path: str, method: str) -> bool:
+    if method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return False
+    return path.startswith((
+        "/api/supreme/", "/api/owner/", "/api/admin/", "/api/portal/state/",
+        "/api/transactions/", "/api/support/tickets/",
+    )) or path == "/api/transactions" or path == "/api/support/tickets"
+
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    def secure_response(response: Response) -> Response:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers.setdefault("Content-Security-Policy", (
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
+            "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        ))
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        if COOKIE_SECURE:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+    if request.url.path.startswith("/api/"):
+        remote = request.client.host if request.client else "unknown"
+        if not API_RATE_LIMITER.allow(f"{remote}|{request.url.path}"):
+            response = JSONResponse(
+                status_code=429, content={"detail": "Too many requests. Try again shortly."},
+                headers={"Retry-After": "60"},
+            )
+            return secure_response(response)
+
     if request.url.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         try:
             check_origin(request)
         except HTTPException as error:
-            return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+            return secure_response(JSONResponse(status_code=error.status_code, content={"detail": error.detail}))
         session_cookie = request.cookies.get(COOKIE_NAME)
-        if session_cookie and request.url.path not in CSRF_EXEMPT_PATHS:
+        if session_cookie:
+            expected = csrf_token_for(session_cookie)
             supplied = request.headers.get("x-csrf-token", "")
-            if not compare_digest(supplied, csrf_token_for(session_cookie)):
-                return JSONResponse(status_code=403, content={"detail": "A valid CSRF token is required."})
+            csrf_cookie = request.cookies.get(CSRF_COOKIE_NAME, "")
+            if not (
+                compare_digest(supplied, expected)
+                and compare_digest(csrf_cookie, expected)
+            ):
+                return secure_response(JSONResponse(
+                    status_code=403, content={"detail": "A valid CSRF token is required."},
+                ))
+    if is_owner_sensitive_mutation(request.url.path, request.method):
+        raw_session = request.cookies.get(COOKIE_NAME)
+        if raw_session:
+            session_hash = sha256(raw_session.encode()).hexdigest()
+            with SessionLocal() as db:
+                portal_session = db.get(PortalSession, session_hash)
+                expiry = aware(portal_session.expires_at) if portal_session else None
+                owner = db.get(User, portal_session.user_id) if expiry and expiry > utc_now() else None
+                if owner and owner.is_active and owner.role == "master":
+                    raw_grant = request.headers.get("x-admin-step-up", "")
+                    grant_hash = sha256(raw_grant.encode()).hexdigest() if raw_grant else ""
+                    consumed = db.execute(delete(AdminStepUpGrant).where(
+                        AdminStepUpGrant.token_hash == grant_hash,
+                        AdminStepUpGrant.user_id == owner.id,
+                        AdminStepUpGrant.session_hash == session_hash,
+                        AdminStepUpGrant.expires_at > utc_now(),
+                    ))
+                    if consumed.rowcount != 1:
+                        db.rollback()
+                        return secure_response(JSONResponse(
+                            status_code=428,
+                            content={
+                                "detail": "Verify your password and authenticator code to continue.",
+                                "stepUpRequired": True,
+                            },
+                        ))
+                    db.commit()
     if request.url.path in {"/api/applications", "/api/transactions"}:
         content_length = request.headers.get("content-length")
         if content_length:
@@ -1224,21 +1371,7 @@ async def security_middleware(request: Request, call_next):
             except ValueError:
                 return JSONResponse(status_code=400, content={"detail": "The request Content-Length is invalid."})
     response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers.setdefault("Content-Security-Policy", (
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
-        "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
-    ))
-    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-    if COOKIE_SECURE:
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Pragma"] = "no-cache"
-    return response
+    return secure_response(response)
 
 
 @app.get("/api/health")
@@ -1365,6 +1498,12 @@ def login(
 ) -> dict[str, Any]:
     identifier = normalized_identifier(body.identifier)
     remote = request.client.host if request.client else "unknown"
+    if not LOGIN_RATE_LIMITER.allow(remote):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many sign-in attempts. Try again in a minute."},
+            headers={"Retry-After": "60"},
+        )
     attempt_key = sha256((remote + "|" + identifier.casefold()).encode()).hexdigest()
     attempt = db.get(LoginAttempt, attempt_key)
     now = utc_now()
@@ -1452,12 +1591,15 @@ def login(
         return {
             "twoFactor": "verify" if user.totp_enrolled else "enroll",
             "preAuth": make_preauth_token(user),
+            "backupCodesAvailable": user.role == "master" and user.totp_enrolled,
         }
     create_session(db, response, user)
     return {"user": session_user_data(user)}
 
 
-def finish_two_factor(db: Session, response: Response, user: User) -> dict[str, Any]:
+def finish_two_factor(
+    db: Session, response: Response, user: User, backup_codes: list[str] | None = None,
+) -> dict[str, Any]:
     authorization = staff_authorization_for(db, user)
     if authorization and authorization.status != "active":
         authorization.status = "active"
@@ -1465,7 +1607,10 @@ def finish_two_factor(db: Session, response: Response, user: User) -> dict[str, 
     user.updated_at = utc_now()
     db.commit()
     create_session(db, response, user)
-    return {"user": session_user_data(user)}
+    result: dict[str, Any] = {"user": session_user_data(user)}
+    if backup_codes is not None:
+        result["backupCodes"] = backup_codes
+    return result
 
 
 def two_factor_throttle(request: Request, db: Session, user: User) -> str:
@@ -1514,8 +1659,11 @@ def two_factor_enroll_verify(
         throttle_fail(db, key)
         raise HTTPException(status_code=401, detail="The verification code is incorrect or expired.")
     user.totp_enrolled = True
+    backup_codes = create_backup_codes(db, user) if user.role == "master" else None
+    if backup_codes is not None:
+        record_audit(db, user, "mfa_backup_created", user.mobile[-4:], {"count": len(backup_codes)})
     throttle_clear(db, key)
-    return finish_two_factor(db, response, user)
+    return finish_two_factor(db, response, user, backup_codes)
 
 
 @app.post("/api/auth/2fa/verify")
@@ -1526,8 +1674,15 @@ def two_factor_verify(
     key = two_factor_throttle(request, db, user)
     if not two_factor_stage_allowed(db, user, "verify"):
         raise HTTPException(status_code=409, detail="Authenticator verification is not available.")
-    if not check_totp(user, body.code):
-        db.rollback()
+    if re.fullmatch(r"\d{6}", body.code or ""):
+        valid = check_totp(user, body.code)
+    else:
+        valid = consume_backup_code(db, user, body.code)
+        if not valid:
+            record_audit(db, user, "mfa_backup_failed", user.mobile[-4:], {
+                "remote": request.client.host[:45] if request.client else "unknown",
+            })
+    if not valid:
         throttle_fail(db, key)
         raise HTTPException(status_code=401, detail="The verification code is incorrect or expired.")
     throttle_clear(db, key)
@@ -1574,6 +1729,37 @@ def verify_current_password(
     if not verify_secret(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Password verification failed.")
     return {"valid": True}
+
+
+@app.post("/api/auth/admin-step-up")
+def admin_step_up(
+    body: OwnerStepUpInput, request: Request,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    if user.role != "master" or not user.totp_enrolled:
+        raise HTTPException(status_code=403, detail="This verification is only available to the enrolled Super Admin.")
+    raw_session = request.cookies.get(COOKIE_NAME, "")
+    if not raw_session:
+        raise HTTPException(status_code=401, detail="Sign in again to continue.")
+    key = two_factor_throttle(request, db, user)
+    if not verify_secret(body.password, user.password_hash) or not check_totp(user, body.code):
+        record_audit(db, user, "admin_stepup_failed", user.mobile[-4:], {
+            "remote": request.client.host[:45] if request.client else "unknown",
+        })
+        throttle_fail(db, key)
+        raise HTTPException(status_code=401, detail="Password or authenticator code is incorrect or expired.")
+
+    throttle_clear(db, key)
+    grant = secrets.token_urlsafe(32)
+    db.add(AdminStepUpGrant(
+        token_hash=sha256(grant.encode()).hexdigest(),
+        user_id=user.id,
+        session_hash=sha256(raw_session.encode()).hexdigest(),
+        expires_at=utc_now() + ADMIN_STEP_UP_LIFETIME,
+    ))
+    record_audit(db, user, "admin_stepup_success", user.mobile[-4:])
+    db.commit()
+    return {"stepUpToken": grant, "expiresIn": int(ADMIN_STEP_UP_LIFETIME.total_seconds())}
 
 
 @app.post("/api/admin/accounts/{identifier}/setup-code")
@@ -3194,20 +3380,22 @@ def commission_slabs(
 
 
 @app.post("/api/service-enquiries")
-def create_service_enquiry(body: dict[str, Any], db: Session = Depends(get_db)) -> dict[str, str]:
-    name = str(body.get("name", "")).strip()[:80]
-    mobile = str(body.get("mobile", "")).strip()
-    service = str(body.get("service", "")).strip()[:80]
-    message = str(body.get("message", "")).strip()[:1000]
-    if len(name) < 2 or not mobile.isdigit() or len(mobile) != 10 or len(service) < 2:
-        raise HTTPException(status_code=422, detail="Enter a valid name, mobile and service.")
+def create_service_enquiry(
+    body: ServiceEnquiryInput, request: Request, db: Session = Depends(get_db),
+) -> dict[str, str]:
+    remote = request.client.host if request.client else "unknown"
+    if not SERVICE_ENQUIRY_LIMITER.allow(remote):
+        raise HTTPException(status_code=429, detail="Too many enquiries. Please try again later.")
+    name, mobile, service, message = body.name, body.mobile, body.service, body.message.strip()
     requests = record_value(db, "rm-demo-service-requests")
+    request_id = "SRV-" + uuid4().hex[:12].upper()
     requests.insert(0, {
-        "id": "SRV-" + uuid4().hex[:12].upper(), "name": name, "mobile": mobile,
+        "id": request_id, "name": name, "mobile": mobile,
         "service": service, "message": message,
         "requestedAt": utc_now().isoformat(), "status": "pending",
     })
     save_record(db, "rm-demo-service-requests", requests)
+    add_owner_alert(db, "service_enquiry", f"New {service} enquiry from {name}", request_id)
     db.commit()
     return {"status": "received"}
 
@@ -3285,6 +3473,13 @@ class PublicAssistantRequest(InputModel):
     message: str = Field(max_length=1000)
 
 
+class PublicSpeechInput(InputModel):
+    sql_checks = False
+    text: str = Field(min_length=1, max_length=300)
+    expiresAt: int
+    token: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def load_ai_settings(db: Session) -> tuple[dict[str, Any], dict[str, Any]]:
     row = db.get(PortalRecord, AI_CONFIG_KEY)
     envelope = row.value if row and isinstance(row.value, dict) else {}
@@ -3332,10 +3527,71 @@ def log_ai_event(
         LOGGER.exception("The assistant conversation could not be logged")
 
 
+def public_speech_signature(text_value: str, remote: str, expires_at: int) -> str:
+    payload = f"public-assistant-speech|{remote}|{expires_at}|{text_value}".encode()
+    return hmac_new(csrf_secret(), payload, sha256).hexdigest()
+
+
+def synthesize_elevenlabs(text_value: str, language: str) -> Response:
+    api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+    if language == "bn":
+        voice_id = os.getenv("ELEVENLABS_BENGALI_VOICE_ID", "").strip() or voice_id
+    if not api_key or not voice_id:
+        raise HTTPException(status_code=503, detail="Neural speech is not configured.")
+
+    url = (
+        "https://api.elevenlabs.io/v1/text-to-speech/"
+        + quote(voice_id, safe="")
+        + "?output_format=mp3_44100_128"
+    )
+    payload = json.dumps({
+        "text": text_value,
+        "model_id": "eleven_v4",
+        "language_code": language,
+    }).encode()
+    provider_request = URLRequest(
+        url,
+        data=payload,
+        headers={
+            "Accept": "audio/mpeg",
+            "Content-Type": "application/json",
+            "xi-api-key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(provider_request, timeout=20) as provider_response:
+            content_type = provider_response.headers.get_content_type()
+            audio = provider_response.read(SPEECH_MAX_AUDIO_BYTES + 1)
+    except HTTPError as error:
+        LOGGER.warning("ElevenLabs speech generation failed with HTTP %s.", error.code)
+        raise HTTPException(status_code=503, detail="Neural speech is temporarily unavailable.") from error
+    except (URLError, TimeoutError, OSError) as error:
+        LOGGER.warning("ElevenLabs speech generation could not reach the provider: %s", error)
+        raise HTTPException(status_code=503, detail="Neural speech is temporarily unavailable.") from error
+
+    if len(audio) > SPEECH_MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=502, detail="The speech response exceeded the size limit.")
+    if not audio or content_type != "audio/mpeg":
+        LOGGER.error("ElevenLabs returned an invalid speech response (content type %s).", content_type)
+        raise HTTPException(status_code=502, detail="Neural speech returned an invalid response.")
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/public/assistant/config")
-def public_assistant_settings(db: Session = Depends(get_db)) -> dict[str, Any]:
+def public_assistant_settings(
+    request: Request, db: Session = Depends(get_db),
+) -> dict[str, Any]:
     section = load_ai_settings(db)[0]["public"]
-    return {"enabled": section["enabled"], "greeting": section["greeting"]}
+    remote = request.client.host if request.client else "unknown"
+    expires_at = int(utc_now().timestamp()) + SPEECH_TOKEN_TTL_SECONDS
+    return {
+        "enabled": section["enabled"],
+        "greeting": section["greeting"],
+        "speechToken": public_speech_signature(section["greeting"], remote, expires_at),
+        "speechExpiresAt": expires_at,
+    }
 
 
 @app.post("/api/public/assistant/chat")
@@ -3344,11 +3600,51 @@ def public_assistant_chat(
 ) -> JSONResponse:
     config = load_ai_settings(db)[0]
     remote = request.client.host if request.client else "unknown"
+    active_retailers = db.scalar(select(func.count(User.id)).where(
+        User.role == "retailer", User.is_active.is_(True),
+    )) or 0
     body, status, outcome, message = run_chat(
         "public", payload.message, config, limiter=PUBLIC_ASSISTANT_LIMITER, rate_key=remote,
+        active_retailers=active_retailers,
     )
+    if status == 200 and body.get("reply"):
+        expires_at = int(utc_now().timestamp()) + SPEECH_TOKEN_TTL_SECONDS
+        body["speechToken"] = public_speech_signature(body["reply"], remote, expires_at)
+        body["speechExpiresAt"] = expires_at
     log_ai_event(db, config, "public", "public", "visitor", message, body["reply"], outcome)
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/public/assistant/speech")
+def public_assistant_speech(
+    body: PublicSpeechInput, request: Request, db: Session = Depends(get_db),
+) -> Response:
+    remote = request.client.host if request.client else "unknown"
+    if not PUBLIC_SPEECH_LIMITER.allow(remote):
+        raise HTTPException(status_code=429, detail="Too many speech requests. Try again shortly.")
+    now = int(utc_now().timestamp())
+    if not now <= body.expiresAt <= now + SPEECH_TOKEN_TTL_SECONDS:
+        raise HTTPException(status_code=403, detail="The speech request has expired.")
+    expected = public_speech_signature(body.text, remote, body.expiresAt)
+    if not compare_digest(body.token, expected):
+        raise HTTPException(status_code=403, detail="The speech request could not be verified.")
+    if not load_ai_settings(db)[0]["public"]["enabled"]:
+        raise HTTPException(status_code=503, detail="The public assistant is temporarily unavailable.")
+    if not SPEECH_GLOBAL_LIMITER.allow("global"):
+        raise HTTPException(status_code=429, detail="Speech is temporarily busy. Try again shortly.")
+    language = "bn" if re.search(r"[\u0980-\u09FF]", body.text) else "en"
+    return synthesize_elevenlabs(body.text, language)
+
+
+@app.post("/api/assistant/owner-greeting")
+def owner_assistant_greeting(
+    owner: User = Depends(role_required("master")),
+) -> Response:
+    if not OWNER_SPEECH_LIMITER.allow(owner.id):
+        raise HTTPException(status_code=429, detail="Too many speech requests. Try again shortly.")
+    if not SPEECH_GLOBAL_LIMITER.allow("global"):
+        raise HTTPException(status_code=429, detail="Speech is temporarily busy. Try again shortly.")
+    return synthesize_elevenlabs(OWNER_GREETING_TEXT, "en")
 
 
 @app.post("/assistant/chat")
@@ -3364,6 +3660,8 @@ def assistant_chat(
     body, status, outcome, message = run_chat(
         "portal", payload.message, config, limiter=ASSISTANT_LIMITER, rate_key=str(user.id), role=user.role,
     )
+    if user.role == "master" and status == 200:
+        body["reply"] = "Namaskar Sir. " + body["reply"]
     log_ai_event(db, config, "portal", user.id, user.role, message, body["reply"], outcome)
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
 

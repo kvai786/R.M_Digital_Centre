@@ -383,6 +383,142 @@ textarea {
     gap: 14px;
 }
 
+.year-end-offer {
+    display: grid;
+    gap: 4px;
+    margin-top: 24px;
+    padding: 14px 16px;
+    border: 1px solid rgba(125, 211, 252, 0.45);
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.72);
+    color: #e0f2fe;
+}
+
+.year-end-offer strong {
+    color: #fde68a;
+}
+
+.year-end-offer small,
+.hero-quick-apply > small {
+    color: #cbd5e1;
+    font-size: 12px;
+}
+
+.hero-quick-apply {
+    display: grid;
+    gap: 8px;
+    margin-top: 16px;
+    padding: 16px;
+    border: 1px solid rgba(226, 232, 240, 0.28);
+    border-radius: 12px;
+    background: rgba(15, 23, 42, 0.56);
+    text-shadow: none;
+}
+
+.hero-quick-apply label {
+    color: #f8fafc;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.hero-quick-apply-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.hero-quick-apply select {
+    flex: 1 1 180px;
+    min-height: 44px;
+    padding: 8px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
+    color: #0f172a;
+    font: inherit;
+}
+
+.partner-benefits {
+    padding: 64px max(6vw, calc((100vw - 1200px) / 2));
+    background: #f8fafc;
+}
+
+.partner-benefits > h2 {
+    margin: 0 0 10px;
+    color: var(--navy);
+    font-size: clamp(25px, 3vw, 34px);
+    line-height: 1.2;
+}
+
+.partner-benefit-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 20px;
+}
+
+.partner-benefit-card {
+    padding: 25px;
+    border: 1px solid var(--line);
+    border-top: 4px solid var(--blue);
+    border-radius: 14px;
+    background: #fff;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+}
+
+.partner-benefit-card:nth-child(2) {
+    border-top-color: #16a34a;
+}
+
+.partner-benefit-card:nth-child(3) {
+    border-top-color: #d97706;
+}
+
+.partner-benefit-icon {
+    display: inline-grid;
+    width: 48px;
+    height: 48px;
+    place-items: center;
+    border-radius: 50%;
+    background: #eff6ff;
+    color: var(--navy);
+    font-weight: 800;
+}
+
+.partner-benefit-card h3 {
+    margin: 16px 0 8px;
+    color: var(--navy);
+}
+
+.partner-benefit-card p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.commercial-video-slot {
+    display: grid;
+    min-height: 220px;
+    margin-top: 24px;
+    padding: 28px;
+    place-items: center;
+    border: 1px solid #cbd5e1;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #0f172a, #1e3a8a);
+    color: #fff;
+    text-align: center;
+}
+
+.commercial-video-slot h3 {
+    margin: 0 0 8px;
+    color: #f8fafc;
+}
+
+.commercial-video-slot p:last-child {
+    margin: 0;
+    color: #cbd5e1;
+}
+
 .btn {
     display: inline-flex;
     align-items: center;
@@ -857,10 +993,13 @@ textarea {
 }
 
 .role-card {
+    display: block;
     padding: 30px;
     border: 1px solid var(--line);
     border-radius: 10px;
     background: var(--surface);
+    color: inherit;
+    text-decoration: none;
     transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease;
 }
 
@@ -874,6 +1013,11 @@ textarea {
 .role-card-featured {
     border-color: #bae6fd;
     box-shadow: 0 10px 28px rgba(2, 132, 199, 0.08);
+}
+
+.role-card:focus-visible {
+    outline: 3px solid var(--blue);
+    outline-offset: 3px;
 }
 
 .role-label {
@@ -2399,6 +2543,23 @@ a:focus-visible {
     border-radius: 8px;
 }
 
+.backup-codes-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.5rem;
+    padding: 0;
+    list-style: none;
+}
+
+.backup-codes-list li {
+    padding: 0.65rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    font-family: monospace;
+    text-align: center;
+}
+
 .support-ticket-form textarea {
     width: 100%;
     resize: vertical;
@@ -2434,6 +2595,10 @@ a:focus-visible {
 
     .hero-buttons {
         justify-content: center;
+    }
+
+    .hero-quick-apply {
+        text-align: left;
     }
 
     .hero-vfx {
@@ -2481,9 +2646,15 @@ a:focus-visible {
 
     .glance-section,
     .opportunities-section,
-    .service-request-section {
+    .service-request-section,
+    .partner-benefits {
         padding-right: 18px;
         padding-left: 18px;
+    }
+
+    .commercial-video-slot {
+        min-height: 180px;
+        padding: 22px;
     }
 
     .explainer-section {

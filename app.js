@@ -32,8 +32,20 @@ async function apiRequest(path, options) {
         requestOptions.headers = Object.assign({}, requestOptions.headers, { "Content-Type": "application/json" });
         requestOptions.body = JSON.stringify(requestOptions.body);
     }
-    const response = await fetch(path, requestOptions);
-    const result = await response.json().catch(function () { return {}; });
+    let response = await fetch(path, requestOptions);
+    let result = await response.json().catch(function () { return {}; });
+    if (response.status === 428 && result.stepUpRequired) {
+        if (typeof window.requestAdminStepUp !== "function") {
+            throw new Error("This action requires fresh administrator verification.");
+        }
+        const token = await window.requestAdminStepUp();
+        if (!token) {
+            throw new Error("Administrator verification was cancelled.");
+        }
+        requestOptions.headers = Object.assign({}, requestOptions.headers, { "X-Admin-Step-Up": token });
+        response = await fetch(path, requestOptions);
+        result = await response.json().catch(function () { return {}; });
+    }
     if (!response.ok) {
         const failure = new Error(result.detail || "The server could not complete this request.");
         failure.captchaRequired = Boolean(result.captchaRequired);
@@ -80,6 +92,8 @@ async function hydratePortalData() {
 }
 
 document.addEventListener("DOMContentLoaded", async function () {
+    initializeYearEndOffer();
+    initializeHomepageApplicationLinks();
     try {
         await hydratePortalData();
     } catch (error) {
@@ -98,6 +112,34 @@ document.addEventListener("DOMContentLoaded", async function () {
     initializeServiceRequests();
     initializePwa();
 });
+
+function initializeYearEndOffer() {
+    if (Date.now() <= Date.parse("2026-12-31T23:59:59Z")) {
+        return;
+    }
+    document.querySelectorAll("[data-year-end-offer]").forEach(function (element) {
+        element.hidden = true;
+    });
+}
+
+function initializeHomepageApplicationLinks() {
+    const form = document.querySelector(".hero-quick-apply");
+    const roleSelector = document.getElementById("hero-partner-role");
+    if (!form || !roleSelector) {
+        return;
+    }
+
+    function openApplication() {
+        const role = roleSelector.value === "distributor" ? "distributor" : "retailer";
+        window.location.assign("register.html?role=" + encodeURIComponent(role));
+    }
+
+    roleSelector.addEventListener("change", openApplication);
+    form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        openApplication();
+    });
+}
 
 function initializeServerApplicationForm() {
     const form = document.getElementById("application-form");
@@ -553,10 +595,18 @@ function initializePortalLogin() {
     const staffSetupForm = document.getElementById("staff-setup-form");
     const twoFactorForm = document.getElementById("two-factor-form");
     const retailerActivationForm = document.getElementById("retailer-activation-form");
+    const backupCodesPanel = document.getElementById("backup-codes-panel");
+    const backupCodesList = document.getElementById("backup-codes-list");
+    const backupCodesContinue = document.getElementById("backup-codes-continue");
+    const backupCodeToggle = document.getElementById("toggle-backup-code");
+    const twoFactorCode = document.getElementById("two-factor-code");
     const status = document.getElementById("login-status");
     let selectedAccount = null;
     let preAuth = "";
     let twoFactorMode = "";
+    let backupCodesAvailable = false;
+    let backupMode = false;
+    let pendingBackupUser = null;
 
     function setStatus(message) {
         status.textContent = message;
@@ -566,6 +616,8 @@ function initializePortalLogin() {
     function showOnly(target) {
         [mobileForm, passwordForm, setupForm, recoveryForm, staffSetupForm, twoFactorForm, retailerActivationForm]
             .forEach(function (form) { form.hidden = form !== target; });
+        backupCodesPanel.hidden = true;
+        backupCodesList.replaceChildren();
         const welcome = document.getElementById("login-welcome");
         if (welcome) { welcome.hidden = true; }
         status.hidden = true;
@@ -575,6 +627,8 @@ function initializePortalLogin() {
         // The name is shown only here, after the password (and 2FA, if required) was verified.
         [mobileForm, passwordForm, setupForm, recoveryForm, staffSetupForm, twoFactorForm, retailerActivationForm]
             .forEach(function (form) { form.hidden = true; });
+        backupCodesPanel.hidden = true;
+        backupCodesList.replaceChildren();
         status.hidden = true;
         const welcome = document.getElementById("login-welcome");
         if (welcome) {
@@ -599,19 +653,50 @@ function initializePortalLogin() {
     function showMobileStep() {
         selectedAccount = null;
         preAuth = "";
+        backupCodesAvailable = false;
         captchaToken = "";
         captchaField.hidden = true;
         showOnly(mobileForm);
         document.getElementById("login-mobile").focus();
     }
 
+    function setBackupCodeMode(enabled) {
+        backupMode = enabled;
+        document.getElementById("two-factor-code-label").textContent =
+            enabled ? "Backup recovery code" : "6-digit code";
+        twoFactorCode.inputMode = enabled ? "text" : "numeric";
+        twoFactorCode.autocomplete = enabled ? "off" : "one-time-code";
+        twoFactorCode.maxLength = enabled ? 29 : 6;
+        if (enabled) {
+            twoFactorCode.removeAttribute("pattern");
+        } else {
+            twoFactorCode.pattern = "[0-9]{6}";
+        }
+        backupCodeToggle.textContent = enabled ? "Use authenticator code" : "Use a backup recovery code";
+        twoFactorCode.value = "";
+    }
+
+    function showBackupCodes(codes, user) {
+        showOnly(null);
+        codes.forEach(function (code) {
+            const item = document.createElement("li");
+            item.textContent = code;
+            backupCodesList.appendChild(item);
+        });
+        pendingBackupUser = user;
+        backupCodesPanel.hidden = false;
+        backupCodesContinue.focus();
+    }
+
     async function showTwoFactor(result) {
         preAuth = result.preAuth;
         twoFactorMode = result.twoFactor;
+        backupCodesAvailable = result.backupCodesAvailable === true;
         const enroll = twoFactorMode === "enroll";
         document.getElementById("two-factor-enroll").hidden = !enroll;
         document.getElementById("two-factor-verify-intro").hidden = enroll;
-        document.getElementById("two-factor-code").value = "";
+        backupCodeToggle.hidden = enroll || !backupCodesAvailable;
+        setBackupCodeMode(false);
         if (enroll) {
             const setup = await apiRequest("/api/auth/2fa/enroll-start", {
                 method: "POST", body: { preAuth: preAuth },
@@ -710,14 +795,27 @@ function initializePortalLogin() {
             const route = twoFactorMode === "enroll" ? "/api/auth/2fa/enroll-verify" : "/api/auth/2fa/verify";
             const result = await apiRequest(route, {
                 method: "POST",
-                body: { preAuth: preAuth, code: document.getElementById("two-factor-code").value.trim() },
+                body: { preAuth: preAuth, code: twoFactorCode.value.trim() },
             });
             document.getElementById("two-factor-qr").removeAttribute("src");
-            redirectForUser(result.user);
+            if (Array.isArray(result.backupCodes) && result.backupCodes.length) {
+                showBackupCodes(result.backupCodes, result.user);
+            } else {
+                redirectForUser(result.user);
+            }
         } catch (error) {
             setStatus(error.message);
-            document.getElementById("two-factor-code").value = "";
+            twoFactorCode.value = "";
         }
+    });
+    backupCodeToggle.addEventListener("click", function () {
+        setBackupCodeMode(!backupMode);
+        twoFactorCode.focus();
+    });
+    backupCodesContinue.addEventListener("click", function () {
+        const user = pendingBackupUser;
+        pendingBackupUser = null;
+        if (user) redirectForUser(user);
     });
     document.getElementById("two-factor-cancel").addEventListener("click", function () {
         document.getElementById("two-factor-qr").removeAttribute("src");
@@ -1115,16 +1213,21 @@ function initializeSupport(user, knownHelpline) {
 }
 
 function playWelcomeVoice(userName, role) {
-    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") {
-        return;
-    }
     const greeting = role === "master"
-        ? "Welcome to your Super Admin Panel, " + userName + "."
+        ? "Namaskar Sir."
         : role === "masteradmin"
             ? "Welcome Master Admin, " + userName + "."
             : role === "distributor"
             ? "Welcome to your Distributor workspace, " + userName + "."
             : "Welcome Sub-Admin, " + userName + ".";
+    if (window.RMVoice && window.RMVoice.supported()) {
+        const options = role === "master" ? { endpoint: "/api/assistant/owner-greeting" } : {};
+        window.RMVoice.speak(greeting, options).catch(function (error) {
+            console.warn("The welcome greeting could not be played:", error);
+        });
+        return;
+    }
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") { return; }
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(greeting);
     utterance.rate = 1;

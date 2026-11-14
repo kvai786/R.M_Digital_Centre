@@ -37,7 +37,11 @@
             body: JSON.stringify({ message: message }),
         });
         const data = await response.json().catch(function () { return {}; });
-        return typeof data.reply === "string" ? data.reply : "Sorry, I could not respond right now.";
+        return {
+            reply: typeof data.reply === "string" ? data.reply : "Sorry, I could not respond right now.",
+            speechToken: data.speechToken,
+            speechExpiresAt: data.speechExpiresAt,
+        };
     }
 
     async function init() {
@@ -81,11 +85,16 @@
         panel.append(head, log, chips, form);
         document.body.append(root, panel);
 
-        function addMessage(text, who) {
+        function addMessage(text, who, speech) {
             const message = el("div", "rm-chat-msg " + who);
             message.append(el("span", "", text));
             if (who === "bot" && window.RMVoice && window.RMVoice.supported()) {
-                message.append(window.RMVoice.createButton(function () { return text; }));
+                const speechOptions = speech && speech.speechToken ? {
+                    endpoint: "/api/public/assistant/speech",
+                    token: speech.speechToken,
+                    expiresAt: speech.speechExpiresAt,
+                } : null;
+                message.append(window.RMVoice.createButton(function () { return text; }, speechOptions));
             }
             log.append(message);
             log.scrollTop = log.scrollHeight;
@@ -96,7 +105,8 @@
             addMessage(text, "user");
             send.disabled = true;
             try {
-                addMessage(await ask(text), "bot");
+                const answer = await ask(text);
+                addMessage(answer.reply, "bot", answer);
             } catch (error) {
                 addMessage("The assistant is unavailable right now. Please try again shortly.", "bot");
             } finally {
@@ -112,7 +122,10 @@
             if (open) { input.focus(); } else { fab.focus(); }
         }
 
-        addMessage(WELCOME, "bot");
+        addMessage(settings.greeting || WELCOME, "bot", {
+            speechToken: settings.speechToken,
+            speechExpiresAt: settings.speechExpiresAt,
+        });
         CHIPS.forEach(function (label) {
             const chip = el("button", "", label);
             chip.type = "button";

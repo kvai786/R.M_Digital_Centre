@@ -1,4 +1,6 @@
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import patch
 
 from assistant_control import (
     DISABLED_REPLY, default_config, normalize_config, redact_for_log, run_chat, safe_config,
@@ -48,13 +50,16 @@ class PublicChatTests(unittest.TestCase):
         return run_chat("public", message, config or self.config, **kwargs)
 
     def test_scope_answers(self):
-        for message, expected in [
-            ("hi", "Hi!"), ("What services do you offer?", "AEPS"), ("Apply for Retailer ID", "Retailer ID"),
-            ("How to become a distributor", "referral code"), ("documents needed", "identity proof"),
+        for message, expected, expected_outcome in [
+            ("hi", "Hi!", "answered"),
+            ("What services do you offer?", "AEPS", "answered"),
+            ("Apply for Retailer ID", "Retailer or Distributor", "sales_application"),
+            ("How to become a distributor", "referral code", "answered"),
+            ("documents needed", "identity proof", "answered"),
         ]:
             with self.subTest(message=message):
                 body, status, outcome, _ = self.ask(message)
-                self.assertEqual((status, outcome), (200, "answered"))
+                self.assertEqual((status, outcome), (200, expected_outcome))
                 self.assertIn(expected, body["reply"])
 
     def test_off_topic_is_refused(self):
@@ -95,6 +100,26 @@ class PublicChatTests(unittest.TestCase):
 
     def test_empty_message(self):
         self.assertEqual(self.ask("   ")[2], "empty")
+
+    def test_internal_milestone_is_never_disclosed(self):
+        below_milestone = self.ask("How do I apply for a Retailer ID?", active_retailers=499)[0]["reply"]
+        at_milestone = self.ask("How do I apply for a Retailer ID?", active_retailers=500)[0]["reply"]
+        for reply in (below_milestone, at_milestone):
+            self.assertNotIn("500", reply)
+            self.assertNotIn("milestone", reply.lower())
+            self.assertNotIn("target", reply.lower())
+
+    def test_year_end_offer_expires_without_income_promises(self):
+        with patch("assistant_control.datetime") as clock:
+            clock.now.return_value = datetime(2026, 12, 31, 12, tzinfo=timezone.utc)
+            before_expiry = self.ask("How can I apply for a Retailer ID?")[0]["reply"]
+            clock.now.return_value = datetime(2027, 1, 1, 0, tzinfo=timezone.utc)
+            after_expiry = self.ask("How can I apply for a Retailer ID?")[0]["reply"]
+        self.assertIn("December 2026 Year-End Special", before_expiry)
+        self.assertNotIn("December 2026 Year-End Special", after_expiry)
+
+        income_reply = self.ask("How much daily income and commission can I earn?")[0]["reply"]
+        self.assertIn("no fixed daily earnings are guaranteed", income_reply)
 
 
 class PortalChatTests(unittest.TestCase):

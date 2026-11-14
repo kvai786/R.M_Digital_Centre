@@ -10,7 +10,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 
 def database_url() -> str:
@@ -46,6 +46,10 @@ def main() -> int:
                  "updated_at = :now WHERE id = :id"),
             {"f": False, "now": now, "id": user.id},
         )
+        if inspect(conn).has_table("backup_recovery_codes"):
+            conn.execute(
+                text("DELETE FROM backup_recovery_codes WHERE user_id = :id"), {"id": user.id},
+            )
         # Staff roles can only enroll while their authorization is 'ready_for_2fa'; the owner has no such row.
         if user.role != "master":
             conn.execute(

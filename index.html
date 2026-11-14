@@ -22,7 +22,7 @@
         </a>
         <nav aria-label="Main navigation">
             <a href="#services">Services</a>
-            <a href="#opportunities">Partner with us</a>
+            <a href="register.html">Partner with us</a>
             <a href="track.html">Track status</a>
             <a href="compliance.html">Legal</a>
             <a class="btn-login" href="login.html">Portal login</a>
@@ -96,11 +96,58 @@
                     <a href="#services" class="btn secondary">Explore services</a>
                     <a href="#download-app" class="btn ghost">Get the app</a>
                 </div>
+                <aside class="year-end-offer" data-year-end-offer aria-label="December 2026 retailer onboarding offer">
+                    <strong>Year-End Special · December 2026</strong>
+                    <span>Priority retailer onboarding and full technical support.</span>
+                    <small>Onboarding remains subject to application review and service-area coverage.</small>
+                </aside>
+                <form class="hero-quick-apply" action="register.html" method="get">
+                    <label for="hero-partner-role">Choose your partner application</label>
+                    <div class="hero-quick-apply-controls">
+                        <select id="hero-partner-role" name="role" aria-label="Choose a partner role">
+                            <option value="" selected>Choose a partner role</option>
+                            <option value="retailer">Retailer ID</option>
+                            <option value="distributor">Distributor ID</option>
+                        </select>
+                        <button class="btn primary" type="submit">Start application</button>
+                    </div>
+                    <small>Your full application and document upload continue on the next page.</small>
+                </form>
                 <ul class="hero-stats" aria-label="Highlights">
                     <li><strong>11</strong><span>Services</span></li>
                     <li><strong>2</strong><span>Partner roles</span></li>
                     <li><strong>24x7</strong><span>Portal access</span></li>
                 </ul>
+            </div>
+        </section>
+
+        <section class="partner-benefits" aria-labelledby="partner-benefits-title">
+            <p class="eyebrow">BUILT FOR LOCAL PARTNERS</p>
+            <h2 id="partner-benefits-title">Grow your local digital service offering.</h2>
+            <p class="section-desc">Explore approved services, onboarding support, and secure portal workflows.</p>
+            <div class="partner-benefit-grid">
+                <article class="partner-benefit-card">
+                    <span class="partner-benefit-icon" aria-hidden="true">AEPS</span>
+                    <h3>Aadhaar-enabled services</h3>
+                    <p>Offer eligible AEPS services through your approved provider setup and partner plan.</p>
+                </article>
+                <article class="partner-benefit-card" data-year-end-offer>
+                    <span class="partner-benefit-icon" aria-hidden="true">ID</span>
+                    <h3>Retailer onboarding support</h3>
+                    <p>Apply for a Retailer ID and receive full technical support under the December 2026 Year-End Special.</p>
+                </article>
+                <article class="partner-benefit-card">
+                    <span class="partner-benefit-icon" aria-hidden="true">✓</span>
+                    <h3>Secure partner workflows</h3>
+                    <p>Use authenticated portal access, protect customer information, and follow your provider's approved procedures.</p>
+                </article>
+            </div>
+            <div class="commercial-video-slot" aria-label="Commercial video space">
+                <div>
+                    <p class="eyebrow">R.M DIGITAL CENTRE</p>
+                    <h3>Our partner introduction video</h3>
+                    <p>Video coming soon.</p>
+                </div>
             </div>
         </section>
 
@@ -162,18 +209,18 @@
             <p class="eyebrow">PARTNER OPPORTUNITIES</p>
             <h2 id="opportunities-title">Choose the role that fits your ambition.</h2>
             <div class="role-grid">
-                <article class="role-card">
+                <a class="role-card" href="register.html?role=retailer" aria-label="Apply for a Retailer ID">
                     <p class="role-label">LOCAL SERVICE PARTNER</p><h3>Retailer</h3>
                     <p>Serve customers in your community with assisted digital services. Earn commission on eligible transactions under your approved partner plan; rates depend on service and provider.</p>
                     <ul class="role-perks"><li>Banking, bills &amp; recharge services</li><li>Dedicated retailer dashboard</li><li>Support from your local distributor</li></ul>
-                    <a class="text-link" href="register.html?role=retailer">Apply for a Retailer ID <span aria-hidden="true">→</span></a>
-                </article>
-                <article class="role-card role-card-featured">
+                    <span class="text-link">Apply for a Retailer ID <span aria-hidden="true">→</span></span>
+                </a>
+                <a class="role-card role-card-featured" href="register.html?role=distributor" aria-label="Apply for a Distributor ID">
                     <p class="role-label">NETWORK BUILDER</p><h3>Distributor</h3>
                     <p>Build and support a local retailer network, help partners get started and earn network commissions according to your approved distributor agreement.</p>
-                                        <ul class="role-perks"><li>Onboard and manage retailers</li><li>Network commission tracking</li><li>Priority partner support</li></ul>
-                                        <a class="text-link" href="register.html?role=distributor">Apply for a Distributor ID <span aria-hidden="true">→</span></a>
-                                    </article>
+                    <ul class="role-perks"><li>Onboard and manage retailers</li><li>Network commission tracking</li><li>Priority partner support</li></ul>
+                    <span class="text-link">Apply for a Distributor ID <span aria-hidden="true">→</span></span>
+                </a>
                                 </div>
                             </section>
 
@@ -199,10 +246,10 @@
             <div id="service-modal-body"></div>
         </div>
     </dialog>
+    <script src="rm-voice.js"></script>
     <script src="app.js"></script>
     <script src="rm-particles.js"></script>
     <script src="home-services.js"></script>
-    <script src="rm-voice.js"></script>
     <script src="public-assistant.js"></script>
 </body>
 </html>

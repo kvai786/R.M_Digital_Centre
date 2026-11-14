@@ -52,10 +52,17 @@
                     <p class="form-intro">Cannot scan? Enter this key manually: <code id="two-factor-key"></code></p>
                 </div>
                 <p class="form-intro" id="two-factor-verify-intro" hidden>Enter the current 6-digit code from your authenticator app.</p>
-                <div class="field"><label for="two-factor-code">6-digit code</label><input id="two-factor-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></div>
+                <div class="field"><label id="two-factor-code-label" for="two-factor-code">6-digit code</label><input id="two-factor-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></div>
+                <button class="text-button" type="button" id="toggle-backup-code" hidden>Use a backup recovery code</button>
                 <button class="btn primary form-submit" type="submit">Verify and sign in</button>
                 <button class="text-button" type="button" id="two-factor-cancel">Cancel</button>
             </form>
+            <section id="backup-codes-panel" class="backup-codes-panel" aria-labelledby="backup-codes-title" hidden>
+                <h2 id="backup-codes-title">Save your backup recovery codes</h2>
+                <p class="form-intro">Each code can be used once. Store them somewhere private and secure; they will not be shown again.</p>
+                <ul id="backup-codes-list" class="backup-codes-list"></ul>
+                <button class="btn primary form-submit" type="button" id="backup-codes-continue">I have saved these codes</button>
+            </section>
             <form id="staff-setup-form" class="flow-step" hidden>
                 <h2>Set your secure password</h2>
                 <p class="form-intro">Choose a strong password and recovery phrase. Your setup will then be sent for final owner approval.</p>

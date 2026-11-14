@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
@@ -55,6 +56,7 @@ class FollowUpTests(unittest.TestCase):
     def setUp(self):
         self.client.cookies.clear()
         server.app.dependency_overrides.clear()
+        server.LOGIN_RATE_LIMITER._hits.clear()
         with server.SessionLocal() as db:
             db.query(server.LoginAttempt).delete()
             db.commit()
@@ -161,6 +163,113 @@ class FollowUpTests(unittest.TestCase):
         with server.SessionLocal() as db:
             db.query(server.PortalRecord).filter_by(key=server.COMMISSION_KEY).delete()
             db.commit()
+
+    def test_service_enquiries_validate_and_alert_the_owner(self):
+        server.SERVICE_ENQUIRY_LIMITER._hits.clear()
+        with server.SessionLocal() as db:
+            db.query(server.PortalRecord).filter(
+                server.PortalRecord.key.in_(("rm-demo-service-requests", server.OWNER_ALERTS_KEY)),
+            ).delete(synchronize_session=False)
+            db.commit()
+
+        invalid = self.client.post(
+            "/api/service-enquiries",
+            headers=HEADERS,
+            json={"name": "Shop One", "mobile": "123", "service": "AEPS", "message": "Please call"},
+        )
+        self.assertEqual(invalid.status_code, 422)
+        with server.SessionLocal() as db:
+            self.assertEqual(server.record_value(db, server.OWNER_ALERTS_KEY), [])
+
+        accepted = self.client.post(
+            "/api/service-enquiries",
+            headers=HEADERS,
+            json={"name": "Shop One", "mobile": "9000000123", "service": "AEPS", "message": "Need onboarding"},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        with server.SessionLocal() as db:
+            request = server.record_value(db, "rm-demo-service-requests")[0]
+            alerts = server.record_value(db, server.OWNER_ALERTS_KEY)
+        self.assertEqual(request["mobile"], "9000000123")
+        self.assertEqual(request["status"], "pending")
+        self.assertTrue(any(
+            alert["kind"] == "service_enquiry" and alert["ref"] == request["id"]
+            for alert in alerts
+        ))
+
+    def test_public_speech_requires_a_fresh_ip_bound_token(self):
+        server.PUBLIC_SPEECH_LIMITER._hits.clear()
+        server.SPEECH_GLOBAL_LIMITER._hits.clear()
+        settings = self.client.get("/api/public/assistant/config").json()
+        self.assertEqual(
+            settings["speechToken"],
+            server.public_speech_signature(
+                settings["greeting"], "203.0.113.20", settings["speechExpiresAt"]),
+        )
+        text_value = "Namaskar."
+        expires_at = int(server.utc_now().timestamp()) + 30
+        token = server.public_speech_signature(text_value, "203.0.113.20", expires_at)
+        with patch.object(server, "load_ai_settings", return_value=({"public": {"enabled": True}}, {})), \
+                patch.object(server, "synthesize_elevenlabs",
+                             return_value=server.Response(b"audio", media_type="audio/mpeg")) as synthesize:
+            response = self.client.post(
+                "/api/public/assistant/speech",
+                headers=HEADERS,
+                json={"text": text_value, "token": token, "expiresAt": expires_at},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.content, b"audio")
+            synthesize.assert_called_once_with(text_value, "en")
+
+            other_ip_token = server.public_speech_signature(text_value, "198.51.100.40", expires_at)
+            other_ip = self.client.post(
+                "/api/public/assistant/speech",
+                headers=HEADERS,
+                json={"text": text_value, "token": other_ip_token, "expiresAt": expires_at},
+            )
+            self.assertEqual(other_ip.status_code, 403)
+
+            expired_at = int(server.utc_now().timestamp()) - 1
+            expired_token = server.public_speech_signature(text_value, "203.0.113.20", expired_at)
+            expired = self.client.post(
+                "/api/public/assistant/speech",
+                headers=HEADERS,
+                json={"text": text_value, "token": expired_token, "expiresAt": expired_at},
+            )
+            self.assertEqual(expired.status_code, 403)
+            synthesize.assert_called_once()
+
+    def test_public_chat_issues_a_token_for_its_reply(self):
+        server.PUBLIC_ASSISTANT_LIMITER._hits.clear()
+        with patch.object(server, "load_ai_settings", return_value=({"logConversations": False}, {})), \
+                patch.object(server, "run_chat",
+                             return_value=({"reply": "Namaskar."}, 200, "ok", "Hello")), \
+                patch.object(server, "log_ai_event"):
+            response = self.client.post(
+                "/api/public/assistant/chat",
+                headers=HEADERS,
+                json={"message": "Hello"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        data = response.json()
+        self.assertEqual(
+            data["speechToken"],
+            server.public_speech_signature(data["reply"], "203.0.113.20", data["speechExpiresAt"]),
+        )
+
+    def test_owner_greeting_requires_master_and_uses_fixed_text(self):
+        server.OWNER_SPEECH_LIMITER._hits.clear()
+        server.SPEECH_GLOBAL_LIMITER._hits.clear()
+        server.app.dependency_overrides[server.current_user] = lambda: self.retailer
+        denied = self.client.post("/api/assistant/owner-greeting", headers=HEADERS)
+        self.assertEqual(denied.status_code, 403)
+
+        server.app.dependency_overrides[server.current_user] = lambda: self.owner
+        with patch.object(server, "synthesize_elevenlabs",
+                          return_value=server.Response(b"audio", media_type="audio/mpeg")) as synthesize:
+            allowed = self.client.post("/api/assistant/owner-greeting", headers=HEADERS)
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+        synthesize.assert_called_once_with(server.OWNER_GREETING_TEXT, "en")
 
 
 class ApostropheTests(unittest.TestCase):
