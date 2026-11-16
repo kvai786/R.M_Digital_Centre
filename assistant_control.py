@@ -272,6 +272,47 @@ def _brand_safe(reply: str) -> str:
     return LEGAL_FALLBACK_TEXT if any(re.search(pattern, reply) for pattern in BRAND_PATTERNS) else reply
 
 
+def _greeting_reply(channel: str, role: str | None, message: str) -> str | None:
+    normalized = "".join(
+        " " if unicodedata.category(char).startswith("P") else char
+        for char in message.casefold()
+    )
+    words = re.sub(r"\s+", " ", normalized).strip().split()
+
+    def contains_phrase(phrases: tuple[str, ...]) -> bool:
+        for phrase in phrases:
+            phrase_words = phrase.split()
+            if any(words[index:index + len(phrase_words)] == phrase_words for index in range(len(words))):
+                return True
+        return False
+
+    bengali_phrases = (
+        "kemon acho", "kamon acho", "kemon achen", "kemon achhen", "ki khobor",
+        "nomoskar", "nomaskar", "কেমন আছো", "কেমন আছেন", "কি খবর", "কী খবর", "নমস্কার",
+    )
+    hindi_phrases = ("kaise ho", "kaise hain", "namaste", "namaskar", "कैसे हो", "कैसे हैं", "नमस्ते", "नमस्कार")
+    in_bengali = contains_phrase(bengali_phrases)
+    in_hindi = contains_phrase(hindi_phrases)
+    owner_greeting = channel == "portal" and role == "master" and contains_phrase(
+        ("hello", "hi", "hey", "hii", "boss", "owner"),
+    )
+    if not in_bengali and not in_hindi and not owner_greeting:
+        return None
+    if channel == "portal" and role == "master":
+        if in_bengali:
+            return "নমস্কার Boss! আমি ভালো আছি। R.M Digital Centre-এর কোন কাজে সাহায্য করতে পারি?"
+        if in_hindi:
+            return "नमस्कार Boss! मैं ठीक हूँ। आज R.M Digital Centre के किस काम में मदद करूँ?"
+        return "Hello Boss! How can I help with R.M Digital Centre today?"
+    if channel == "public":
+        if in_hindi and not in_bengali:
+            return "नमस्कार! मैं R.M Digital Centre assistant हूँ। आपकी क्या सहायता कर सकता हूँ?"
+        return "নমস্কার! আমি R.M Digital Centre assistant. আপনাকে কীভাবে সাহায্য করতে পারি?"
+    if in_hindi and not in_bengali:
+        return "नमस्कार! मैं आपके R.M. Digital Centre workspace में मदद कर सकता हूँ। बताइए, क्या चाहिए?"
+    return "Namaskar! I can help with your R.M. Digital Centre workspace. What do you need?"
+
+
 def redact_for_log(message: str) -> str:
     masked = re.sub(r"[\w.+-]+@[\w-]+(\.[\w-]+)+", "[email]", message)
     masked = re.sub(r"\d(?:[\s-]?\d){5,}", "[number]", masked)
@@ -296,6 +337,9 @@ def run_chat(
         if blocked["reply"] == IDENTITY_REPLY:
             return {"reply": config["identityReply"]}, 200, "identity", message
         return blocked, 200, "blocked", message
+    greeting_reply = _greeting_reply(channel, role, message)
+    if greeting_reply:
+        return {"reply": greeting_reply}, 200, "greeting", message
     if channel == "public":
         lowered = message.lower()
         if any(term in lowered for term in ("commission", "income", "earnings", "earning", "profit", "kamaai")):

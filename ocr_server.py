@@ -3897,7 +3897,7 @@ def assistant_chat(
     body, status, outcome, message = run_chat(
         "portal", payload.message, config, limiter=ASSISTANT_LIMITER, rate_key=str(user.id), role=user.role,
     )
-    if user.role == "master" and status == 200:
+    if user.role == "master" and status == 200 and outcome != "greeting":
         body["reply"] = "Namaskar Sir. " + body["reply"]
     log_ai_event(db, config, "portal", user.id, user.role, message, body["reply"], outcome)
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})

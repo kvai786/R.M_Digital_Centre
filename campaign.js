@@ -9,6 +9,11 @@
             if (!response.ok) throw new Error("Campaign details could not be loaded.");
             const campaign = await response.json();
             if (!campaign.active) return;
+            const badge = document.getElementById("dynamic-trend-badge");
+            const campaignTerms = campaign.title + " " + campaign.message;
+            if (badge && /zero joining fee/i.test(campaignTerms) && /\bearly\b/i.test(campaignTerms)) {
+                badge.hidden = false;
+            }
 
             const title = document.createElement("strong");
             title.textContent = campaign.title;

@@ -684,7 +684,7 @@
         $("campaign-region").value = config.region;
         $("campaign-start").value = config.startsAt;
         $("campaign-end").value = config.endsAt;
-        $("growth-progress").textContent = `${data.progress} / ${data.target} active partners in the configured regions`;
+        $("growth-progress").textContent = `${data.progress} approved active partner accounts in the configured regions`;
     }
 
     async function saveGrowthCampaign(event) {
@@ -699,7 +699,7 @@
         };
         const data = await guarded(() => api("/api/supreme/growth-campaign", { method: "PUT", body }));
         if (!data) return;
-        $("growth-progress").textContent = `${data.progress} / ${data.target} active partners in the configured regions`;
+        $("growth-progress").textContent = `${data.progress} approved active partner accounts in the configured regions`;
         notify(body.enabled ? "Growth campaign saved. It will show only within the configured dates." : "Growth campaign saved as a draft.");
     }
 

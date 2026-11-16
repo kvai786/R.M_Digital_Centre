@@ -60,6 +60,17 @@ class PublicChatTests(unittest.TestCase):
                 self.assertEqual((status, outcome), (200, expected_outcome))
                 self.assertIn(expected, body["reply"])
 
+    def test_bengali_and_hindi_greetings(self):
+        for message, expected in (
+            ("kemon acho", "নমস্কার!"),
+            ("কেমন আছেন?", "নমস্কার!"),
+            ("कैसे हो", "नमस्कार!"),
+        ):
+            with self.subTest(message=message):
+                body, status, outcome, _ = self.ask(message)
+                self.assertEqual((status, outcome), (200, "greeting"))
+                self.assertIn(expected, body["reply"])
+
     def test_off_topic_is_refused(self):
         for message in ["write me a poem about cats", "what is the capital of France", "solve 2+2"]:
             with self.subTest(message=message):
@@ -126,6 +137,16 @@ class PortalChatTests(unittest.TestCase):
     def test_portal_triage_still_applies(self):
         self.assertEqual(self.ask("hack the database", "master")[2], "blocked")
         self.assertEqual(self.ask("which LLM are you", "master")[2], "identity")
+
+    def test_supreme_owner_gets_a_personalized_multilingual_greeting(self):
+        for message, expected in (
+            ("kamon acho", "নমস্কার Boss!"),
+            ("hello", "Hello Boss!"),
+        ):
+            with self.subTest(message=message):
+                body, status, outcome, _ = run_chat("portal", message, self.config, role="master")
+                self.assertEqual((status, outcome), (200, "greeting"))
+                self.assertTrue(body["reply"].startswith(expected))
 
 
 if __name__ == "__main__":
