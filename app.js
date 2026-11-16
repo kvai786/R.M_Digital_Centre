@@ -92,7 +92,6 @@ async function hydratePortalData() {
 }
 
 document.addEventListener("DOMContentLoaded", async function () {
-    initializeYearEndOffer();
     initializeHomepageApplicationLinks();
     try {
         await hydratePortalData();
@@ -112,15 +111,6 @@ document.addEventListener("DOMContentLoaded", async function () {
     initializeServiceRequests();
     initializePwa();
 });
-
-function initializeYearEndOffer() {
-    if (Date.now() <= Date.parse("2026-12-31T23:59:59Z")) {
-        return;
-    }
-    document.querySelectorAll("[data-year-end-offer]").forEach(function (element) {
-        element.hidden = true;
-    });
-}
 
 function initializeHomepageApplicationLinks() {
     const form = document.querySelector(".hero-quick-apply");

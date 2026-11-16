@@ -47,11 +47,12 @@
         const user = await currentUser();
         if (!user) { return; }
 
-        const fab = el("button", "rm-bot rm-portal-fab", "\uD83D\uDCAC");
+        const ownerAssistant = user.role === "master";
+        const fab = el("button", "rm-bot rm-portal-fab" + (ownerAssistant ? " rm-supreme-fab" : ""), "\uD83D\uDCAC");
         fab.type = "button";
         fab.setAttribute("aria-label", "Open assistant");
         fab.setAttribute("aria-expanded", "false");
-        const panel = el("div", "rm-chat-panel");
+        const panel = el("div", "rm-chat-panel" + (ownerAssistant ? " rm-supreme-chat-panel" : ""));
         panel.hidden = true;
         panel.setAttribute("role", "dialog");
         panel.setAttribute("aria-label", "R.M Digital Centre assistant");
@@ -81,10 +82,20 @@
             const message = el("div", "rm-chat-msg " + who);
             message.append(el("span", "", text));
             if (who === "bot" && window.RMVoice && window.RMVoice.supported()) {
-                message.append(window.RMVoice.createButton(function () { return text; }));
+                const speechOptions = ownerAssistant ? {
+                    endpoint: "/api/assistant/owner-speech",
+                    jsonText: true,
+                } : null;
+                message.append(window.RMVoice.createButton(function () { return text; }, speechOptions));
             }
             log.append(message);
             log.scrollTop = log.scrollHeight;
+        }
+
+        function setOpen(open) {
+            panel.hidden = !open;
+            fab.setAttribute("aria-expanded", String(open));
+            if (open) { input.focus(); } else { fab.focus(); }
         }
 
         addMessage("Namaste! How can I help you today?", "bot");

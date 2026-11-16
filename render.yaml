@@ -17,6 +17,10 @@ services:
         sync: false
       - key: DOCUMENT_ENCRYPTION_KEY
         sync: false
+      - key: DOCUMENT_STORAGE_BACKEND
+        value: cloudinary
+      - key: CLOUDINARY_URL
+        sync: false
       - key: RM_MASTER_BOOTSTRAP_TOKEN
         sync: false
       - key: MASTER_ADMIN_MOBILE

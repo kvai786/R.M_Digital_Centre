@@ -31,9 +31,9 @@
         <h2>2. How we use it</h2>
         <p>We use your data only to verify your identity, run your account, process and track requests, provide support and keep the service secure. We do not sell your data.</p>
         <h2>3. Documents</h2>
-        <p>Uploaded documents are stored encrypted, used only for identity verification, and automatically deleted after review or within 7 days. Official activation of regulated services needs e-KYC on the relevant partner's own system.</p>
+        <p>Uploaded documents are encrypted by our server before being sent to a private Cloudinary storage account. They are decrypted only by our application for authorized review. Customer KYC files are deleted from primary storage when an application is approved, rejected or blocked; pending or correction-requested files are automatically deleted within 30 days, and other KYC files within 7 days. Audit metadata and application status may remain after the file is deleted. Official activation of regulated services needs e-KYC on the relevant partner's own system.</p>
         <h2>4. Sharing</h2>
-        <p>We share data with service providers and banking partners only as needed to deliver the service you request, or when the law requires it.</p>
+        <p>Cloudinary stores only the encrypted document files; our document-encryption key is not shared with Cloudinary. We share other data with service providers and banking partners only as needed to deliver the service you request, or when the law requires it.</p>
         <h2>5. Security</h2>
         <p>We use hashed passwords, two-factor authentication for staff, secure cookies, request validation and rate limiting. No system is completely risk free, so please protect your credentials.</p>
         <h2>6. AI assistant</h2>
@@ -42,7 +42,7 @@
         <p>You may ask to access, correct or delete your personal data, or withdraw consent, by contacting support. Some records may be kept where the law requires.</p>
         <h2>8. Contact</h2>
         <p>Use the Support section of the portal or the helpline shown there.</p>
-        <p class="legal-note">Last updated: October 2026.</p>
+        <p class="legal-note">Last updated: November 2026.</p>
     </main>
     <footer class="footer">
         <p>&copy; <span id="current-year">2026</span> R.M Digital Centre. All rights reserved.</p>

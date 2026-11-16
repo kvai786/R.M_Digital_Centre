@@ -318,6 +318,59 @@
         if (done) { notify(`Staff ${action} complete.`); loadStaff(); }
     }
 
+    function confirmStaffDeletion(item) {
+        return new Promise((resolve) => {
+            const dialog = el("dialog", { class: "oc-delete-dialog" });
+            const form = el("form", {});
+            const input = el("input", { type: "tel", inputmode: "numeric", autocomplete: "off", required: "" });
+            const status = el("p", { class: "oc-hint", role: "status", "aria-live": "polite" });
+            const cancel = el("button", { class: "oc-btn ghost", type: "button", text: "Cancel" });
+            const confirm = el("button", { class: "oc-btn danger", type: "submit", text: "Delete permanently" });
+            form.append(
+                el("h2", { text: "Permanently delete Master Admin" }),
+                el("p", { class: "oc-hint", text: `This removes ${item.name}'s revoked or permanently blocked authorization and account. This cannot be undone.` }),
+                el("label", {}, `Type ${item.mobile} to confirm`, input),
+                status,
+                el("div", { class: "oc-row-actions" }, cancel, confirm),
+            );
+            dialog.append(form);
+            document.body.append(dialog);
+            let finished = false;
+            function finish(accepted) {
+                if (finished) return;
+                finished = true;
+                dialog.close();
+                dialog.remove();
+                resolve(accepted);
+            }
+            cancel.addEventListener("click", () => finish(false));
+            dialog.addEventListener("cancel", (event) => { event.preventDefault(); finish(false); });
+            dialog.addEventListener("close", () => finish(false));
+            form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                if (input.value.trim() !== item.mobile) {
+                    status.textContent = "The mobile number does not match.";
+                    input.focus();
+                    return;
+                }
+                finish(true);
+            });
+            if (typeof dialog.showModal !== "function") {
+                dialog.remove();
+                resolve(false);
+                return;
+            }
+            dialog.showModal();
+            input.focus();
+        });
+    }
+
+    async function deleteRevokedMasteradmin(item) {
+        if (!await confirmStaffDeletion(item)) return;
+        const done = await guarded(() => api(`/api/owner/staff/${item.id}`, { method: "DELETE" }));
+        if (done) { notify("Revoked Master Admin permanently deleted."); loadStaff(); }
+    }
+
     async function loadStaff() {
         const items = await guarded(() => api("/api/owner/staff"));
         if (!items) return;
@@ -327,6 +380,13 @@
                 const button = el("button", { type: "button", class: "oc-btn small " + (action === "approve" ? "" : "ghost"), text: action });
                 button.addEventListener("click", () => staffAction(item, action));
                 actions.append(button);
+            }
+            if (item.role === "masteradmin" && item.canDelete) {
+                const remove = el("button", {
+                    type: "button", class: "oc-btn small danger", text: "delete permanently",
+                });
+                remove.addEventListener("click", () => deleteRevokedMasteradmin(item));
+                actions.append(remove);
             }
             const signOut = el("button", { type: "button", class: "oc-btn small ghost", text: "force sign-out" });
             signOut.addEventListener("click", async () => {
@@ -614,9 +674,39 @@
         }
     }
 
+    async function loadGrowthCampaign() {
+        const data = await guarded(() => api("/api/supreme/growth-campaign"));
+        if (!data) return;
+        const config = data.config;
+        $("campaign-enabled").checked = config.enabled;
+        $("campaign-title").value = config.title;
+        $("campaign-message").value = config.message;
+        $("campaign-region").value = config.region;
+        $("campaign-start").value = config.startsAt;
+        $("campaign-end").value = config.endsAt;
+        $("growth-progress").textContent = `${data.progress} / ${data.target} active partners in the configured regions`;
+    }
+
+    async function saveGrowthCampaign(event) {
+        event.preventDefault();
+        const body = {
+            enabled: $("campaign-enabled").checked,
+            title: $("campaign-title").value.trim(),
+            message: $("campaign-message").value.trim(),
+            region: $("campaign-region").value.trim(),
+            startsAt: $("campaign-start").value,
+            endsAt: $("campaign-end").value,
+        };
+        const data = await guarded(() => api("/api/supreme/growth-campaign", { method: "PUT", body }));
+        if (!data) return;
+        $("growth-progress").textContent = `${data.progress} / ${data.target} active partners in the configured regions`;
+        notify(body.enabled ? "Growth campaign saved. It will show only within the configured dates." : "Growth campaign saved as a draft.");
+    }
+
     const loaders = {
         overview: loadOverview, staff: loadStaff, security: loadSecurity, tickets: loadTickets,
-        logs: () => loadLogs(false), database: loadDatabase, documents: loadDocuments, ai: loadAi,
+        logs: () => loadLogs(false), database: loadDatabase, documents: loadDocuments,
+        growth: loadGrowthCampaign, ai: loadAi,
     };
 
     async function init() {
@@ -641,6 +731,7 @@
             const done = await guarded(() => apiUpload("/api/supreme/upload-document", new FormData(form)));
             if (done) { form.reset(); notify(done.message); loadDocuments(); }
         });
+        $("campaign-form").addEventListener("submit", saveGrowthCampaign);
 
         $("staff-form").addEventListener("submit", async (event) => {
             event.preventDefault();

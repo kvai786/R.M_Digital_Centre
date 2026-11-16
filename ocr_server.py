@@ -46,6 +46,7 @@ from assistant_control import (
 )
 from assistant_triage import RateLimiter
 from brand_documents import VIEWER_CSP, is_watermarkable, watermark_viewer_html
+import document_storage
 
 ASSISTANT_LIMITER = RateLimiter(limit=15, window_seconds=60)
 PUBLIC_ASSISTANT_LIMITER = RateLimiter(limit=10, window_seconds=60)
@@ -127,6 +128,8 @@ TRACK_LIMITER = RateLimiter(limit=8, window_seconds=60)
 TICKET_STATUSES = ("open", "in_progress", "closed")
 OWNER_ALERTS_KEY = "rm-owner-alerts"
 COMMISSION_KEY = "rm-commission-slabs"
+GROWTH_CAMPAIGN_KEY = "rm-growth-campaign"
+GROWTH_CAMPAIGN_TARGET = 600
 # Identifier-only lockout is opt-in; the owner's own number is exempt so it cannot be used to lock the owner out.
 ACCOUNT_LOCKOUT_ENABLED = os.getenv("ACCOUNT_LOCKOUT_ENABLED", "0").lower() in {"1", "true", "yes"}
 ACCOUNT_LOCKOUT_THRESHOLD = max(5, int(os.getenv("ACCOUNT_LOCKOUT_THRESHOLD", "20")))
@@ -145,7 +148,7 @@ STATIC_FILES = {
     "index.html", "login.html", "register.html", "admin.html", "retailer.html",
     "dashboard.html", "dashboard.css", "dashboard.js",
     "styles.css", "app.js", "admin-step-up.js", "admin-step-up.css",
-    "home-services.js", "manifest.json", "sw.js", "icon.svg",
+    "home-services.js", "campaign.js", "manifest.json", "sw.js", "icon.svg",
     "icon-192.png", "icon-512.png", "assistant.css", "public-assistant.js", "portal-assistant.js",
         "rm-voice.js", "track.html", "track.js", "commission.html", "commission.js",
     "compliance.html", "compliance.js", "credentials.json", "terms.html", "privacy.html", "refund.html",
@@ -722,15 +725,56 @@ def document_fernet() -> Fernet:
         raise RuntimeError("DOCUMENT_ENCRYPTION_KEY must be a valid Fernet key.") from error
 
 
-def persist_document(storage_dir: Path, contents: bytes, fernet: Fernet) -> tuple[str, Path]:
-    storage_key = uuid4().hex + ".enc"
-    destination = storage_dir / storage_key
-    encrypted = fernet.encrypt(contents)
-    with destination.open("xb") as stored_file:
-        stored_file.write(encrypted)
-    if system() != "Windows":
-        destination.chmod(0o600)
-    return storage_key, destination
+def persist_document(storage_dir: Path, contents: bytes, fernet: Fernet) -> str:
+    storage_key = uuid4().hex
+    try:
+        document_storage.store_encrypted(storage_dir, storage_key, fernet.encrypt(contents))
+    except document_storage.DocumentStorageUnavailable as error:
+        LOGGER.exception("Document storage rejected a new upload.")
+        raise HTTPException(status_code=503, detail="Document storage is temporarily unavailable.") from error
+    return storage_key
+
+
+def read_document(storage_dir: Path, storage_key: str, fernet: Fernet) -> bytes:
+    try:
+        encrypted = document_storage.read_encrypted(storage_dir, storage_key)
+    except document_storage.DocumentStorageNotFound as error:
+        raise HTTPException(status_code=404, detail="The requested document is unavailable.") from error
+    except document_storage.DocumentStorageUnavailable as error:
+        LOGGER.exception("Document storage could not serve document %s", storage_key)
+        raise HTTPException(status_code=503, detail="Document storage is temporarily unavailable.") from error
+    try:
+        return fernet.decrypt(encrypted)
+    except InvalidToken as error:
+        LOGGER.exception("Document integrity check failed for storage key %s", storage_key)
+        raise HTTPException(status_code=500, detail="The requested document could not be verified.") from error
+
+
+def delete_document(storage_dir: Path, storage_key: str) -> None:
+    try:
+        document_storage.delete_document(storage_dir, storage_key)
+    except document_storage.DocumentStorageUnavailable as error:
+        LOGGER.exception("Document storage could not delete document %s", storage_key)
+        raise HTTPException(status_code=503, detail="Document storage could not delete the document.") from error
+
+
+def migrate_local_documents_to_cloudinary(db: Session, storage_dir: Path) -> int:
+    if document_storage.backend() != "cloudinary":
+        return 0
+    migrated = 0
+    for model in (CustomerDocument, TransactionDocument, BusinessDocument):
+        for document in db.scalars(select(model)):
+            path = document_storage.local_path(storage_dir, document.storage_key)
+            if not path.is_file():
+                continue
+            document_storage.store_encrypted(
+                storage_dir, document.storage_key, path.read_bytes(), overwrite=True,
+            )
+            path.unlink()
+            migrated += 1
+    if migrated:
+        LOGGER.info("Migrated %d local encrypted document(s) to private Cloudinary storage.", migrated)
+    return migrated
 
 
 def record_value(db: Session, key: str) -> list[dict[str, Any]]:
@@ -1060,7 +1104,7 @@ def purge_customer_documents(db: Session, documents: list[CustomerDocument]) -> 
     for document in documents:
         if document.purged_at:
             continue
-        (storage_dir / document.storage_key).unlink(missing_ok=True)
+        delete_document(storage_dir, document.storage_key)
         document.purged_at = now
         document.original_filename = "[purged]"
         purged.setdefault(document.application_id, set()).add(document.id)
@@ -1296,6 +1340,7 @@ def reset_master_two_factor_on_startup(db: Session) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     document_fernet()
+    document_storage.ensure_configured()
     storage_dir = document_storage_dir()
     storage_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if system() != "Windows":
@@ -1309,6 +1354,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
         db.execute(select(1))
         provision_master(db)
         reset_master_two_factor_on_startup(db)
+        migrate_local_documents_to_cloudinary(db, storage_dir)
     purge_task = asyncio.create_task(document_purge_loop())
     yield
     purge_task.cancel()
@@ -1889,14 +1935,26 @@ def staff_setup(body: StaffSetupInput, request: Request, db: Session = Depends(g
     return {"status": "pending_owner_final_approval"}
 
 
-def staff_data(item: StaffAuthorization) -> dict[str, Any]:
+def staff_data(item: StaffAuthorization, can_delete: bool = False) -> dict[str, Any]:
     return {
         "id": item.id, "role": item.role, "name": item.name, "mobile": item.mobile,
         "scope": item.scope, "status": item.status,
+        "canDelete": can_delete,
         "createdAt": item.created_at.isoformat(),
         "setupSubmittedAt": item.setup_submitted_at.isoformat() if item.setup_submitted_at else "",
         "approvedAt": item.approved_at.isoformat() if item.approved_at else "",
     }
+
+
+def revoked_masteradmin_deletable(db: Session, item: StaffAuthorization) -> bool:
+    if item.role != "masteradmin":
+        return False
+    user = db.scalar(select(User).where(User.mobile == item.mobile))
+    account_lock_key = sha256(("acct|" + normalized_identifier(item.mobile).casefold()).encode()).hexdigest()
+    account_lock = db.get(LoginAttempt, account_lock_key)
+    if account_lock and account_lock.permanent:
+        return user is None or user.role == "masteradmin"
+    return item.status == "revoked" and (user is None or (user.role == "masteradmin" and not user.is_active))
 
 
 @app.get("/api/owner/staff")
@@ -1904,7 +1962,7 @@ def owner_list_staff(
     _: User = Depends(role_required("master")), db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     rows = db.scalars(select(StaffAuthorization).order_by(StaffAuthorization.created_at.desc()))
-    return [staff_data(item) for item in rows]
+    return [staff_data(item, revoked_masteradmin_deletable(db, item)) for item in rows]
 
 
 @app.post("/api/owner/staff")
@@ -1959,6 +2017,38 @@ def owner_staff_action(
 
     db.commit()
     return staff_data(item)
+
+
+@app.delete("/api/owner/staff/{staff_id}")
+def owner_delete_revoked_masteradmin(
+    staff_id: str,
+    owner: User = Depends(role_required("master")),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    item = db.get(StaffAuthorization, staff_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Staff record not found.")
+    user = db.scalar(select(User).where(User.mobile == item.mobile))
+    if not revoked_masteradmin_deletable(db, item):
+        raise HTTPException(
+            status_code=409,
+            detail="Only a revoked or permanently blocked Master Admin record can be permanently deleted.",
+        )
+    if user and user.role != "masteradmin":
+        raise HTTPException(status_code=409, detail="This mobile number belongs to a different account type.")
+    account_lock_key = sha256(("acct|" + normalized_identifier(item.mobile).casefold()).encode()).hexdigest()
+    if user:
+        db.execute(delete(PortalSession).where(PortalSession.user_id == user.id))
+        db.execute(delete(BackupRecoveryCode).where(BackupRecoveryCode.user_id == user.id))
+        db.execute(delete(AdminStepUpGrant).where(AdminStepUpGrant.user_id == user.id))
+        db.delete(user)
+    db.execute(delete(LoginAttempt).where(LoginAttempt.key == account_lock_key))
+    db.delete(item)
+    record_audit(db, owner, "masteradmin_permanent_delete", item.mobile[-4:], {
+        "role": item.role, "hadAccount": user is not None,
+    })
+    db.commit()
+    return {"deleted": True}
 
 
 @app.get("/api/admin/helpline")
@@ -2495,15 +2585,7 @@ def download_customer_document(
     if document.purged_at:
         raise HTTPException(status_code=410, detail="This document was deleted under the 7-day KYC retention policy.")
     storage_dir = document_storage_dir()
-    path = (storage_dir / document.storage_key).resolve()
-    if path.parent != storage_dir or not path.is_file():
-        LOGGER.error("Customer document storage is missing or invalid for document %s", document.id)
-        raise HTTPException(status_code=404, detail="The requested customer document is unavailable.")
-    try:
-        contents = document_fernet().decrypt(path.read_bytes())
-    except InvalidToken as error:
-        LOGGER.exception("Customer document integrity check failed for document %s", document.id)
-        raise HTTPException(status_code=500, detail="The requested customer document could not be verified.") from error
+    contents = read_document(storage_dir, document.storage_key, document_fernet())
     return preview_response(contents, document.content_type, document.original_filename)
 
 
@@ -2518,15 +2600,7 @@ def download_transaction_document(
     if not document or document.transaction_id != transaction_id:
         raise HTTPException(status_code=404, detail="The requested transaction document was not found.")
     storage_dir = document_storage_dir()
-    path = (storage_dir / document.storage_key).resolve()
-    if path.parent != storage_dir or not path.is_file():
-        LOGGER.error("Transaction document storage is missing or invalid for document %s", document.id)
-        raise HTTPException(status_code=404, detail="The requested transaction document is unavailable.")
-    try:
-        contents = document_fernet().decrypt(path.read_bytes())
-    except InvalidToken as error:
-        LOGGER.exception("Transaction document integrity check failed for document %s", document.id)
-        raise HTTPException(status_code=500, detail="The requested transaction document could not be verified.") from error
+    contents = read_document(storage_dir, document.storage_key, document_fernet())
     return preview_response(contents, document.content_type, document.original_filename)
 
 
@@ -2555,7 +2629,8 @@ async def upload_business_document(
         raise HTTPException(status_code=400, detail="Choose a valid document type: " + ", ".join(BUSINESS_DOCUMENT_TYPES) + ".")
     contents, content_type, filename = await read_validated_document(file)
     fernet = document_fernet()
-    storage_key, saved_path = await run_in_threadpool(persist_document, document_storage_dir(), contents, fernet)
+    storage_dir = document_storage_dir()
+    storage_key = await run_in_threadpool(persist_document, storage_dir, contents, fernet)
     try:
         document = BusinessDocument(
             doc_type=doc_type, original_filename=filename, content_type=content_type,
@@ -2567,7 +2642,7 @@ async def upload_business_document(
         db.commit()
     except Exception:
         db.rollback()
-        saved_path.unlink(missing_ok=True)
+        delete_document(storage_dir, storage_key)
         LOGGER.exception("Business document upload failed")
         raise HTTPException(status_code=500, detail="The document could not be saved.")
     return {"success": True, "message": BUSINESS_DOCUMENT_TYPES[doc_type] + " document uploaded successfully.",
@@ -2591,15 +2666,7 @@ def view_business_document(
     document = db.get(BusinessDocument, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="The requested document was not found.")
-    storage_dir = document_storage_dir()
-    path = (storage_dir / document.storage_key).resolve()
-    if path.parent != storage_dir or not path.is_file():
-        raise HTTPException(status_code=404, detail="The requested document is unavailable.")
-    try:
-        contents = document_fernet().decrypt(path.read_bytes())
-    except InvalidToken as error:
-        LOGGER.exception("Business document integrity check failed for document %s", document.id)
-        raise HTTPException(status_code=500, detail="The requested document could not be verified.") from error
+    contents = read_document(document_storage_dir(), document.storage_key, document_fernet())
     return preview_response(contents, document.content_type, document.original_filename)
 
 
@@ -2613,12 +2680,10 @@ def delete_business_document(
     if not document:
         raise HTTPException(status_code=404, detail="The requested document was not found.")
     storage_dir = document_storage_dir()
-    path = (storage_dir / document.storage_key).resolve()
+    delete_document(storage_dir, document.storage_key)
     record_audit(db, owner, "business_document_delete", document.doc_type, {"sha256": document.sha256_hex})
     db.delete(document)
     db.commit()
-    if path.parent == storage_dir:
-        path.unlink(missing_ok=True)
     return {"success": True}
 
 
@@ -2848,7 +2913,7 @@ async def submit_application(
         data["routedAt"] = utc_now().isoformat()
     revision = int(data.get("revision", 1))
     storage_dir = document_storage_dir()
-    saved_paths: list[Path] = []
+    saved_paths: list[str] = []
     total_size = 0
     attached_documents = []
     fernet = document_fernet()
@@ -2865,10 +2930,10 @@ async def submit_application(
             total_size += len(contents)
             if total_size > MAX_TOTAL_DOCUMENT_BYTES:
                 raise HTTPException(status_code=413, detail="All application documents together must be 40 MB or smaller.")
-            storage_key, saved_path = await run_in_threadpool(
+            storage_key = await run_in_threadpool(
                 persist_document, storage_dir, contents, fernet,
             )
-            saved_paths.append(saved_path)
+            saved_paths.append(storage_key)
             document = CustomerDocument(
                 application_id=data["id"],
                 revision=revision,
@@ -2908,8 +2973,8 @@ async def submit_application(
         db.commit()
     except Exception as error:
         db.rollback()
-        for saved_path in saved_paths:
-            saved_path.unlink(missing_ok=True)
+        for storage_key in saved_paths:
+            delete_document(storage_dir, storage_key)
         if not isinstance(error, HTTPException):
             LOGGER.exception("Application submission or document storage failed")
         raise
@@ -3308,7 +3373,7 @@ async def create_transaction(
         raise HTTPException(status_code=422, detail="Transaction details are invalid.") from error
 
     reference = body.reference.strip()
-    saved_paths: list[Path] = []
+    saved_paths: list[str] = []
     documents: list[dict[str, Any]] = []
     total_size = 0
     try:
@@ -3333,10 +3398,10 @@ async def create_transaction(
                         status_code=413,
                         detail="All transaction documents together must be 40 MB or smaller.",
                     )
-                storage_key, saved_path = await run_in_threadpool(
+                storage_key = await run_in_threadpool(
                     persist_document, storage_dir, contents, fernet,
                 )
-                saved_paths.append(saved_path)
+                saved_paths.append(storage_key)
                 document = TransactionDocument(
                     transaction_id=row.id,
                     original_filename=filename,
@@ -3352,8 +3417,8 @@ async def create_transaction(
         db.commit()
     except Exception as error:
         db.rollback()
-        for saved_path in saved_paths:
-            saved_path.unlink(missing_ok=True)
+        for storage_key in saved_paths:
+            delete_document(storage_dir, storage_key)
         if not isinstance(error, HTTPException):
             LOGGER.exception("Transaction submission or document storage failed")
         raise
@@ -3530,6 +3595,104 @@ class PublicSpeechInput(InputModel):
     token: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class OwnerSpeechInput(InputModel):
+    scan_text = False
+    text: str = Field(min_length=1, max_length=300)
+
+
+class GrowthCampaignInput(InputModel):
+    enabled: bool = False
+    title: str = Field(default="", max_length=100)
+    message: str = Field(default="", max_length=500)
+    region: str = Field(default="Bankura, Kotulpur", max_length=120)
+    startsAt: str = Field(default="", max_length=10)
+    endsAt: str = Field(default="", max_length=10)
+
+
+def default_growth_campaign() -> dict[str, Any]:
+    return GrowthCampaignInput(
+        title="Retailer and Distributor onboarding",
+        message=(
+            "Ask us about the welcome onboarding bonus, zero joining fee for early joiners, "
+            "and current AEPS/DMT commission slabs. Eligibility and service-area coverage apply."
+        ),
+    ).model_dump()
+
+
+def load_growth_campaign(db: Session) -> dict[str, Any]:
+    row = db.get(PortalRecord, GROWTH_CAMPAIGN_KEY)
+    if row is None:
+        return default_growth_campaign()
+    try:
+        return GrowthCampaignInput.model_validate(row.value).model_dump()
+    except ValidationError as error:
+        LOGGER.exception("The saved growth campaign configuration is invalid.")
+        raise HTTPException(status_code=500, detail="The growth campaign configuration is invalid.") from error
+
+
+def growth_campaign_window(config: dict[str, Any]) -> tuple[datetime, datetime]:
+    if not config["startsAt"] or not config["endsAt"]:
+        raise ValueError("Enter both campaign start and end dates.")
+    try:
+        campaign_timezone = timezone(timedelta(hours=5, minutes=30))
+        start = datetime.strptime(config["startsAt"], "%Y-%m-%d").replace(
+            tzinfo=campaign_timezone,
+        ).astimezone(UTC)
+        end = datetime.strptime(config["endsAt"], "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, microsecond=999999, tzinfo=campaign_timezone,
+        ).astimezone(UTC)
+    except ValueError as error:
+        raise ValueError("Enter campaign dates in YYYY-MM-DD format.") from error
+    if end <= start or (end.date() - start.date()).days > 62:
+        raise ValueError("Campaign dates must be ordered and cover no more than 62 days.")
+    return start, end
+
+
+def growth_campaign_is_active(config: dict[str, Any], now: datetime | None = None) -> bool:
+    if not config["enabled"] or not config["title"].strip() or not config["message"].strip():
+        return False
+    try:
+        start, end = growth_campaign_window(config)
+    except ValueError:
+        return False
+    current = now or utc_now()
+    return start <= current <= end
+
+
+def growth_campaign_progress(db: Session, config: dict[str, Any]) -> int:
+    if not config["startsAt"]:
+        return 0
+    try:
+        start, end = growth_campaign_window(config)
+    except ValueError:
+        return 0
+    active_mobiles = set(db.scalars(select(User.mobile).where(
+        User.role.in_(("retailer", "distributor")),
+        User.is_active.is_(True),
+        User.created_at >= start,
+        User.created_at <= end,
+    )))
+    if not active_mobiles:
+        return 0
+    regions = [part.strip().casefold() for part in config["region"].split(",") if part.strip()]
+    if not regions:
+        return 0
+    applications = db.scalars(select(Application).where(
+        Application.mobile.in_(active_mobiles),
+        Application.role.in_(("retailer", "distributor")),
+        Application.status == "approved",
+    ))
+    counted: set[str] = set()
+    for application in applications:
+        location = " ".join(
+            str(application.payload.get(field, ""))
+            for field in ("city", "jurisdiction", "address")
+        ).casefold()
+        if any(region in location for region in regions):
+            counted.add(application.mobile)
+    return len(counted)
+
+
 def load_ai_settings(db: Session) -> tuple[dict[str, Any], dict[str, Any]]:
     row = db.get(PortalRecord, AI_CONFIG_KEY)
     envelope = row.value if row and isinstance(row.value, dict) else {}
@@ -3650,19 +3813,30 @@ def public_assistant_chat(
 ) -> JSONResponse:
     config = load_ai_settings(db)[0]
     remote = request.client.host if request.client else "unknown"
-    active_retailers = db.scalar(select(func.count(User.id)).where(
-        User.role == "retailer", User.is_active.is_(True),
-    )) or 0
     body, status, outcome, message = run_chat(
         "public", payload.message, config, limiter=PUBLIC_ASSISTANT_LIMITER, rate_key=remote,
-        active_retailers=active_retailers,
     )
+    if outcome == "sales_application" and growth_campaign_is_active(load_growth_campaign(db)):
+        body["reply"] += " See the current onboarding offer and role-specific application links on our homepage."
     if status == 200 and body.get("reply"):
         expires_at = int(utc_now().timestamp()) + SPEECH_TOKEN_TTL_SECONDS
         body["speechToken"] = public_speech_signature(body["reply"], remote, expires_at)
         body["speechExpiresAt"] = expires_at
     log_ai_event(db, config, "public", "public", "visitor", message, body["reply"], outcome)
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/public/growth-campaign")
+def public_growth_campaign(db: Session = Depends(get_db)) -> dict[str, Any]:
+    config = load_growth_campaign(db)
+    if not growth_campaign_is_active(config):
+        return {"active": False}
+    return {
+        "active": True,
+        "title": config["title"],
+        "message": config["message"],
+        "region": config["region"],
+    }
 
 
 @app.post("/api/public/assistant/speech")
@@ -3695,6 +3869,19 @@ def owner_assistant_greeting(
     if not SPEECH_GLOBAL_LIMITER.allow("global"):
         raise HTTPException(status_code=429, detail="Speech is temporarily busy. Try again shortly.")
     return synthesize_elevenlabs(OWNER_GREETING_TEXT, "en")
+
+
+@app.post("/api/assistant/owner-speech")
+def owner_assistant_speech(
+    body: OwnerSpeechInput,
+    owner: User = Depends(role_required("master")),
+) -> Response:
+    if not OWNER_SPEECH_LIMITER.allow(owner.id):
+        raise HTTPException(status_code=429, detail="Too many speech requests. Try again shortly.")
+    if not SPEECH_GLOBAL_LIMITER.allow("global"):
+        raise HTTPException(status_code=429, detail="Speech is temporarily busy. Try again shortly.")
+    language = "bn" if re.search(r"[\u0980-\u09FF]", body.text) else "en"
+    return synthesize_elevenlabs(body.text, language)
 
 
 @app.post("/assistant/chat")
@@ -4057,6 +4244,50 @@ def supreme_database(_: User = Depends(owner_only), db: Session = Depends(get_db
 def supreme_ai_get_config(_: User = Depends(owner_only), db: Session = Depends(get_db)) -> dict[str, Any]:
     config, meta = load_ai_settings(db)
     return {"config": config, "meta": meta}
+
+
+@app.get("/api/supreme/growth-campaign")
+def supreme_growth_campaign_get(
+    _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    config = load_growth_campaign(db)
+    return {
+        "config": config,
+        "target": GROWTH_CAMPAIGN_TARGET,
+        "progress": growth_campaign_progress(db, config),
+    }
+
+
+@app.put("/api/supreme/growth-campaign")
+def supreme_growth_campaign_put(
+    body: GrowthCampaignInput,
+    owner: User = Depends(owner_only),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    config = body.model_dump()
+    if config["enabled"]:
+        if not config["title"].strip() or not config["message"].strip() or not config["region"].strip():
+            raise HTTPException(status_code=422, detail="Add a title, offer details, and target regions before publishing.")
+        try:
+            growth_campaign_window(config)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+    row = db.get(PortalRecord, GROWTH_CAMPAIGN_KEY)
+    if row is None:
+        db.add(PortalRecord(key=GROWTH_CAMPAIGN_KEY, value=config))
+    else:
+        row.value = config
+        row.updated_at = utc_now()
+    record_audit(db, owner, "growth_campaign_update", GROWTH_CAMPAIGN_KEY, {
+        "enabled": config["enabled"], "region": config["region"],
+        "startsAt": config["startsAt"], "endsAt": config["endsAt"],
+    })
+    db.commit()
+    return {
+        "config": config,
+        "target": GROWTH_CAMPAIGN_TARGET,
+        "progress": growth_campaign_progress(db, config),
+    }
 
 
 @app.put("/api/supreme/ai/config")

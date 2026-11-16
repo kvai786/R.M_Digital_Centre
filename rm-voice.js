@@ -110,6 +110,9 @@
                         token: config.token,
                         expiresAt: config.expiresAt,
                     });
+                } else if (config.jsonText) {
+                    headers["Content-Type"] = "application/json";
+                    request.body = JSON.stringify({ text: clean });
                 }
                 const response = await fetch(config.endpoint, request);
                 if (!response.ok) {

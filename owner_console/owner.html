@@ -38,6 +38,7 @@
         <button type="button" data-tab="logs" aria-selected="false">System logs</button>
         <button type="button" data-tab="database" aria-selected="false">Database</button>
         <button type="button" data-tab="documents" aria-selected="false">Documents</button>
+        <button type="button" data-tab="growth" aria-selected="false">Growth campaign</button>
         <button type="button" data-tab="ai" aria-selected="false">AI Control Center</button>
     </nav>
 
@@ -161,6 +162,24 @@
                 <button class="oc-btn" type="submit">Upload</button>
             </form>
             <div class="oc-card oc-scroll"><table class="oc-table" id="doc-table"></table></div>
+        </section>
+
+        <section data-panel="growth" aria-labelledby="growth-title" hidden>
+            <h1 id="growth-title">Partner growth campaign</h1>
+            <p class="oc-hint">Campaign goal: 600 new active Retailer and Distributor accounts in two months. Progress counts approved, active accounts whose application region matches the configured target regions.</p>
+            <div class="oc-card">
+                <strong id="growth-progress">Loading campaign progress…</strong>
+            </div>
+            <form class="oc-card oc-grid" id="campaign-form">
+                <label class="oc-check"><input type="checkbox" id="campaign-enabled"> Publish while within campaign dates</label>
+                <label>Campaign headline<input id="campaign-title" maxlength="100" required></label>
+                <label>Offer and eligibility details<textarea id="campaign-message" rows="4" maxlength="500" required></textarea></label>
+                <label>Target regions<input id="campaign-region" maxlength="120" value="Bankura, Kotulpur" required></label>
+                <label>Start date<input id="campaign-start" type="date"></label>
+                <label>End date<input id="campaign-end" type="date"></label>
+                <button class="oc-btn" type="submit">Save campaign</button>
+                <p class="oc-hint">Do not publish until the bonus, joining-fee eligibility, commission details, and end date are accurate. AEPS/DMT commission can vary by approved plan and provider.</p>
+            </form>
         </section>
 
         <section data-panel="ai" aria-labelledby="ai-title" hidden>

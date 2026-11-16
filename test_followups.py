@@ -137,6 +137,240 @@ class FollowUpTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "belongs to another user"):
                     server.provision_master(db)
 
+    def test_owner_can_delete_only_revoked_inactive_masteradmin(self):
+        mobile = "9000000901"
+        with server.SessionLocal() as db:
+            user = server.User(
+                mobile=mobile, name="Revoked Admin", role="masteradmin", is_active=False,
+                password_hash=None, totp_enrolled=False,
+            )
+            staff = server.StaffAuthorization(
+                role="masteradmin", name=user.name, mobile=mobile, scope="Bankura",
+                status="revoked", created_by=self.owner.id,
+            )
+            db.add_all([user, staff])
+            db.flush()
+            staff_id, user_id = staff.id, user.id
+            db.add(server.PortalSession(
+                token_hash="d" * 64, user_id=user_id, expires_at=server.utc_now(),
+            ))
+            db.add(server.BackupRecoveryCode(user_id=user_id, code_hash="e" * 64))
+            db.commit()
+
+        self.as_user("/api/owner/staff/{staff_id}", "DELETE", self.owner)
+        response = self.client.delete(f"/api/owner/staff/{staff_id}", headers=HEADERS)
+        self.assertEqual(response.status_code, 200, response.text)
+        with server.SessionLocal() as db:
+            self.assertIsNone(db.get(server.User, user_id))
+            self.assertIsNone(db.get(server.StaffAuthorization, staff_id))
+            self.assertIsNone(db.scalar(server.select(server.PortalSession.token_hash).where(
+                server.PortalSession.user_id == user_id,
+            )))
+            self.assertIsNotNone(db.scalar(server.select(server.AuditLog.id).where(
+                server.AuditLog.action == "masteradmin_permanent_delete",
+            )))
+        self.assertTrue(server.is_owner_sensitive_mutation("/api/owner/staff/record-id", "DELETE"))
+
+    def test_owner_delete_rejects_an_active_masteradmin(self):
+        mobile = "9000000904"
+        with server.SessionLocal() as db:
+            user = server.User(mobile=mobile, name="Active Admin", role="masteradmin", is_active=True)
+            staff = server.StaffAuthorization(
+                role="masteradmin", name=user.name, mobile=mobile, scope="Bankura",
+                status="revoked", created_by=self.owner.id,
+            )
+            db.add_all([user, staff])
+            db.commit()
+            staff_id, user_id = staff.id, user.id
+
+        self.as_user("/api/owner/staff/{staff_id}", "DELETE", self.owner)
+        response = self.client.delete(f"/api/owner/staff/{staff_id}", headers=HEADERS)
+        self.assertEqual(response.status_code, 409, response.text)
+        with server.SessionLocal() as db:
+            self.assertIsNotNone(db.get(server.User, user_id))
+            db.delete(db.get(server.User, user_id))
+            db.delete(db.get(server.StaffAuthorization, staff_id))
+            db.commit()
+
+    def test_owner_can_delete_a_permanently_blocked_masteradmin_account(self):
+        mobile = "9000000905"
+        account_lock_key = server.sha256(
+            ("acct|" + server.normalized_identifier(mobile).casefold()).encode(),
+        ).hexdigest()
+        with server.SessionLocal() as db:
+            user = server.User(mobile=mobile, name="Blocked Admin", role="masteradmin", is_active=True)
+            staff = server.StaffAuthorization(
+                role="masteradmin", name=user.name, mobile=mobile, scope="Kotulpur",
+                status="ready_for_2fa", created_by=self.owner.id,
+            )
+            db.add_all([user, staff])
+            db.add(server.LoginAttempt(key=account_lock_key, permanent=True, failures=20))
+            db.commit()
+            staff_id, user_id = staff.id, user.id
+
+        self.as_user("/api/owner/staff/{staff_id}", "DELETE", self.owner)
+        response = self.client.delete(f"/api/owner/staff/{staff_id}", headers=HEADERS)
+        self.assertEqual(response.status_code, 200, response.text)
+        with server.SessionLocal() as db:
+            self.assertIsNone(db.get(server.User, user_id))
+            self.assertIsNone(db.get(server.LoginAttempt, account_lock_key))
+
+    def test_growth_campaign_is_date_gated_and_counts_active_target_region_partners(self):
+        today = server.utc_now().date()
+        start = (today - server.timedelta(days=1)).isoformat()
+        end = (today + server.timedelta(days=60)).isoformat()
+        mobile = "9000000902"
+        application_id = "APP-CAMPAIGN-TEST"
+        with server.SessionLocal() as db:
+            old = db.get(server.PortalRecord, server.GROWTH_CAMPAIGN_KEY)
+            if old:
+                db.delete(old)
+            db.add(server.User(mobile=mobile, name="Campaign Partner", role="retailer", is_active=True))
+            db.add(server.Application(
+                id=application_id, mobile=mobile, role="retailer", status="approved",
+                distributor_application_id="", submitted_at=server.utc_now(),
+                payload={"city": "Kotulpur", "jurisdiction": "Bankura"},
+            ))
+            db.commit()
+
+        self.as_user("/api/supreme/growth-campaign", "PUT", self.owner)
+        payload = {
+            "enabled": True,
+            "title": "Partner onboarding",
+            "message": "Ask about current onboarding terms and eligibility.",
+            "region": "Bankura, Kotulpur",
+            "startsAt": start,
+            "endsAt": end,
+        }
+        saved = self.client.put("/api/supreme/growth-campaign", headers=HEADERS, json=payload)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["target"], 600)
+        self.assertEqual(saved.json()["progress"], 1)
+
+        public = self.client.get("/api/public/growth-campaign", headers=HEADERS)
+        self.assertEqual(public.status_code, 200, public.text)
+        self.assertTrue(public.json()["active"])
+        self.assertEqual(public.json()["region"], "Bankura, Kotulpur")
+
+        payload["endsAt"] = (today + server.timedelta(days=63)).isoformat()
+        invalid = self.client.put("/api/supreme/growth-campaign", headers=HEADERS, json=payload)
+        self.assertEqual(invalid.status_code, 422)
+
+        with server.SessionLocal() as db:
+            campaign = db.get(server.PortalRecord, server.GROWTH_CAMPAIGN_KEY)
+            db.delete(campaign)
+            db.delete(db.get(server.Application, application_id))
+            db.query(server.User).filter_by(mobile=mobile).delete()
+            db.commit()
+
+    def test_customer_documents_are_deleted_and_marked_when_purged(self):
+        application_id = "APP-PURGE-TEST"
+        storage_key = "f" * 32
+        storage_dir = server.document_storage_dir()
+        path = server.document_storage.local_path(storage_dir, storage_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"encrypted-document")
+        with server.SessionLocal() as db:
+            db.add(server.Application(
+                id=application_id, mobile="9000000903", role="retailer", status="pending",
+                distributor_application_id="", submitted_at=server.utc_now(),
+                payload={"documents": [{"id": "a" * 32, "fileName": "id.png"}]},
+            ))
+            document = server.CustomerDocument(
+                id="a" * 32, application_id=application_id, revision=1, label="Identity proof",
+                original_filename="id.png", content_type="image/png", size_bytes=20,
+                sha256_hex="b" * 64, storage_key=storage_key,
+            )
+            db.add(document)
+            db.flush()
+            count = server.purge_application_documents(db, application_id)
+            db.commit()
+            self.assertEqual(count, 1)
+            self.assertIsNotNone(document.purged_at)
+            self.assertEqual(document.original_filename, "[purged]")
+            self.assertEqual(db.get(server.Application, application_id).payload["documents"][0]["fileName"], "[purged]")
+        self.assertFalse(path.exists())
+
+    def test_application_rejection_purges_customer_document_immediately(self):
+        application_id = "APP-REVIEW-PURGE"
+        mobile = "9000000906"
+        storage_key = "9" * 32
+        storage_dir = server.document_storage_dir()
+        path = server.document_storage.local_path(storage_dir, storage_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"encrypted-document")
+        payload = {
+            "id": application_id,
+            "name": "Review Applicant",
+            "mobile": mobile,
+            "role": "retailer",
+            "status": "pending",
+            "documents": [{"id": "8" * 32, "fileName": "identity.png"}],
+            "revisionHistory": [],
+        }
+        with server.SessionLocal() as db:
+            db.add(server.Application(
+                id=application_id, mobile=mobile, role="retailer", status="pending",
+                distributor_application_id="", submitted_at=server.utc_now(), payload=payload,
+            ))
+            db.add(server.CustomerDocument(
+                id="8" * 32, application_id=application_id, revision=1, label="Identity proof",
+                original_filename="identity.png", content_type="image/png", size_bytes=20,
+                sha256_hex="7" * 64, storage_key=storage_key,
+            ))
+            db.flush()
+            rejected = {**payload, "status": "rejected", "rejectionReason": "Incomplete documents"}
+            server.save_applications(db, [rejected], self.owner)
+            db.commit()
+            document = db.get(server.CustomerDocument, "8" * 32)
+            self.assertEqual(db.get(server.Application, application_id).status, "rejected")
+            self.assertIsNotNone(document.purged_at)
+        self.assertFalse(path.exists())
+
+    def test_startup_migrates_existing_local_document_bytes_to_cloudinary(self):
+        engine = server.create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        self.addCleanup(engine.dispose)
+        server.Base.metadata.create_all(engine)
+        sessions = server.sessionmaker(bind=engine)
+        storage_key = "6" * 32 + ".enc"
+        encrypted = b"existing-fernet-ciphertext"
+        with tempfile.TemporaryDirectory() as directory:
+            root = server.Path(directory)
+            path = server.document_storage.local_path(root, storage_key)
+            path.write_bytes(encrypted)
+            with sessions() as db:
+                db.add(server.Application(
+                    id="APP-MIGRATE-TEST", mobile="9000000907", role="retailer", status="pending",
+                    distributor_application_id="", submitted_at=server.utc_now(), payload={},
+                ))
+                db.add(server.CustomerDocument(
+                    id="5" * 32, application_id="APP-MIGRATE-TEST", revision=1,
+                    label="Identity proof", original_filename="identity.png",
+                    content_type="image/png", size_bytes=20, sha256_hex="4" * 64,
+                    storage_key=storage_key,
+                ))
+                db.commit()
+                with patch.dict(os.environ, {"DOCUMENT_STORAGE_BACKEND": "cloudinary"}), \
+                        patch.object(server.document_storage, "store_encrypted") as store:
+                    count = server.migrate_local_documents_to_cloudinary(db, root)
+            self.assertEqual(count, 1)
+            store.assert_called_once_with(root, storage_key, encrypted, overwrite=True)
+            self.assertFalse(path.exists())
+
+    def test_owner_assistant_speech_uses_configured_elevenlabs_backend(self):
+        server.OWNER_SPEECH_LIMITER._hits.clear()
+        server.SPEECH_GLOBAL_LIMITER._hits.clear()
+        self.as_user("/api/assistant/owner-speech", "POST", self.owner)
+        with patch.object(server, "synthesize_elevenlabs",
+                          return_value=server.Response(b"audio", media_type="audio/mpeg")) as synthesize:
+            response = self.client.post(
+                "/api/assistant/owner-speech", headers=HEADERS, json={"text": "Namaskar"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        synthesize.assert_called_once_with("Namaskar", "en")
+
     def test_production_startup_provisions_master_in_configured_database(self):
         engine = server.create_engine(
             "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,

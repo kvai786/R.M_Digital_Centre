@@ -383,7 +383,7 @@ textarea {
     gap: 14px;
 }
 
-.year-end-offer {
+.growth-campaign {
     display: grid;
     gap: 4px;
     margin-top: 24px;
@@ -394,14 +394,23 @@ textarea {
     color: #e0f2fe;
 }
 
-.year-end-offer strong {
+.growth-campaign[hidden] { display: none; }
+
+.growth-campaign strong {
     color: #fde68a;
 }
 
-.year-end-offer small,
+.growth-campaign small,
 .hero-quick-apply > small {
     color: #cbd5e1;
     font-size: 12px;
+}
+
+.growth-campaign-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
 }
 
 .hero-quick-apply {
