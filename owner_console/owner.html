@@ -39,6 +39,7 @@
         <button type="button" data-tab="database" aria-selected="false">Database</button>
         <button type="button" data-tab="documents" aria-selected="false">Documents</button>
         <button type="button" data-tab="growth" aria-selected="false">Growth campaign</button>
+        <button type="button" data-tab="design" aria-selected="false">Homepage design</button>
         <button type="button" data-tab="ai" aria-selected="false">AI Control Center</button>
     </nav>
 
@@ -262,6 +263,29 @@
                 <button class="oc-btn" id="test-run" type="button">Send test message</button>
                 <div class="oc-result" id="test-result" aria-live="polite" hidden></div>
             </div>
+        </section>
+
+        <section data-panel="design" aria-labelledby="design-title" hidden>
+            <h1 id="design-title">Homepage design drafts</h1>
+            <p class="oc-hint">Drafts never appear publicly until you approve them. Changing a design clears approval; save with approval checked to publish it. Font rotation changes every 48 hours using readable fonts.</p>
+            <form class="oc-card oc-grid" id="homepage-design-form">
+                <label>Season / trend draft
+                    <select id="design-theme">
+                        <option value="standard">Standard</option>
+                        <option value="festive">Festive</option>
+                        <option value="monsoon">Monsoon</option>
+                        <option value="summer">Summer</option>
+                        <option value="winter">Winter</option>
+                        <option value="trend">Modern trend</option>
+                    </select>
+                </label>
+                <label>Start date<input id="design-start" type="date"></label>
+                <label>End date<input id="design-end" type="date"></label>
+                <label class="oc-check"><input type="checkbox" id="design-font-rotation"> Rotate readable fonts every 48 hours</label>
+                <label class="oc-check"><input type="checkbox" id="design-approved"> Owner approved and visible during the selected dates</label>
+                <button class="oc-btn ghost" id="design-preview" type="button">Preview draft</button>
+                <button class="oc-btn" type="submit">Save design decision</button>
+            </form>
         </section>
     </main>
     <script src="/admin-step-up.js"></script>

@@ -278,7 +278,11 @@ def _brand_safe(reply: str) -> str:
 
 def _message_language(message: str) -> str:
     folded = f" {message.casefold()} "
-    if re.search(r"[\u0980-\u09ff]", message) or any(
+    if re.search(r"[\u0980-\u09ff]", message):
+        return "bn"
+    if re.search(r"[\u0900-\u097f]", message):
+        return "hi"
+    if any(
         phrase in folded
         for phrase in (
             "kimo", "kemon", "kamon", "kothay", "ki khobor", "nomoskar", "nomaskar", "achi", "aachi",
@@ -286,7 +290,7 @@ def _message_language(message: str) -> str:
         )
     ):
         return "bn"
-    if re.search(r"[\u0900-\u097f]", message) or any(
+    if any(
         phrase in folded
         for phrase in (
             "kaise", "namaste", "namaskar", "kya", "kaam", "chahiye", "mujhe", "aap ", "aapko",
@@ -329,6 +333,93 @@ def _public_scope_reply(language: str) -> str:
         "I can help with R.M Digital Centre services and applying for a Retailer or Distributor ID. "
         "Would you like service details, or should I help you choose an ID to apply for?"
     )
+
+
+def _unavailable_reply(language: str, *, rate_limited: bool) -> str:
+    if language == "bn":
+        return "অনেক বার্তা পাঠানো হয়েছে। অনুগ্রহ করে এক মিনিট পরে আবার চেষ্টা করুন।" if rate_limited else (
+            "সহকারী সাময়িকভাবে উপলব্ধ নয়। অনুগ্রহ করে পরে আবার চেষ্টা করুন।"
+        )
+    if language == "hi":
+        return "बहुत अधिक संदेश भेजे गए हैं। कृपया एक मिनट बाद फिर कोशिश करें।" if rate_limited else (
+            "सहायक अभी उपलब्ध नहीं है। कृपया बाद में फिर कोशिश करें।"
+        )
+    return RATE_LIMIT_REPLY if rate_limited else DISABLED_REPLY
+
+
+def _creator_reply(language: str) -> str:
+    if language == "bn":
+        return (
+            "R.M Digital Centre-এর মালিক ও স্রষ্টাই এই সিস্টেমের Boss। "
+            "তিনি এই প্ল্যাটফর্মকে নির্দেশনা দেন এবং সঠিকভাবে এগিয়ে নিয়ে যান।"
+        )
+    if language == "hi":
+        return (
+            "R.M Digital Centre के मालिक और सृष्टिकर्ता ही इस सिस्टम के Boss हैं। "
+            "वे इस प्लेटफ़ॉर्म का मार्गदर्शन करते हैं और सिस्टम को सही दिशा में आगे बढ़ाते हैं।"
+        )
+    return (
+        "The owner and creator of R.M Digital Centre is the Boss who guides this system "
+        "and leads the platform forward."
+    )
+
+
+def _portal_language_reply(language: str, role: str | None) -> str:
+    label = "Supreme Owner" if role == "master" else "R.M Digital Centre portal"
+    if language == "bn":
+        return (
+            f"আমি {label} workspace-এ আপনার সাহায্য করতে পারি। "
+            "অনুগ্রহ করে service, wallet, application বা support সংক্রান্ত প্রশ্নটি একটু স্পষ্ট করে বলুন।"
+        )
+    return (
+        f"मैं {label} workspace में आपकी सहायता कर सकता हूँ। "
+        "कृपया service, wallet, application या support से जुड़ा सवाल साफ़-साफ़ लिखें।"
+    )
+
+
+def _localized_topic_reply(language: str, message: str) -> str | None:
+    folded = message.casefold()
+    if any(term in folded for term in (
+        "document", "kyc", "proof", "দস্তাবেজ", "নথি", "কেওয়াইসি", "दस्तावेज", "केवाईसी",
+    )):
+        if language == "bn":
+            return (
+                "Retailer ID-এর জন্য পরিচয়, ঠিকানা, দোকান/ব্যবসা এবং masked Aadhaar/PAN নথি প্রয়োজন। "
+                "Distributor ID-এর ক্ষেত্রে অতিরিক্ত ব্যবসায়িক ও ব্যাংক নথি লাগতে পারে।"
+            )
+        if language == "hi":
+            return (
+                "Retailer ID के लिए पहचान, पता, दुकान/व्यवसाय और masked Aadhaar/PAN दस्तावेज़ चाहिए। "
+                "Distributor ID के लिए अतिरिक्त व्यवसायिक और बैंक दस्तावेज़ लग सकते हैं।"
+            )
+    if any(term in folded for term in (
+        "aeps", "micro atm", "recharge", "service", "সেবা", "পায়েস", "सेवा", "रिचार्ज",
+    )):
+        if language == "bn":
+            return (
+                "R.M Digital Centre-এ AEPS, Micro ATM, money transfer, recharge ও bill payment "
+                "পরিষেবা নিয়ে সহায়তা পাওয়া যায়। আপনি Retailer না Distributor ID নিতে চান?"
+            )
+        if language == "hi":
+            return (
+                "R.M Digital Centre में AEPS, Micro ATM, money transfer, recharge और bill payment "
+                "सेवाओं की जानकारी मिलती है। क्या आप Retailer या Distributor ID लेना चाहते हैं?"
+            )
+    if any(term in folded for term in (
+        "commission", "income", "earnings", "earning", "profit", "kamaai", "আয়", "কমিশন",
+        "आय", "कमाई", "कमीशन",
+    )):
+        if language == "bn":
+            return (
+                "Commission বা আয় অনুমোদিত partner plan, provider, service coverage ও transaction volume "
+                "অনুযায়ী বদলে যায়; নির্দিষ্ট দৈনিক আয়ের নিশ্চয়তা নেই। Retailer বা Distributor ID বেছে নিন।"
+            )
+        if language == "hi":
+            return (
+                "Commission और आय स्वीकृत partner plan, provider, service coverage और transaction volume "
+                "पर निर्भर करती है; तय दैनिक आय का वादा नहीं है। Retailer या Distributor ID चुनें।"
+            )
+    return None
 
 
 def _greeting_reply(channel: str, role: str | None, message: str) -> str | None:
@@ -380,6 +471,8 @@ def _greeting_reply(channel: str, role: str | None, message: str) -> str | None:
         )
     if in_hindi and not in_bengali:
         return "नमस्कार! मैं आपके R.M. Digital Centre workspace में मदद कर सकता हूँ। बताइए, क्या चाहिए?"
+    if in_bengali:
+        return "নমস্কার! আমি আপনার R.M. Digital Centre workspace-এ সাহায্য করতে পারি। কী জানতে চান?"
     return "Namaskar! I can help with your R.M. Digital Centre workspace. What do you need?"
 
 
@@ -395,13 +488,13 @@ def run_chat(
 ) -> tuple[dict[str, str], int, str, str]:
     """Return (body, http_status, outcome, sanitized_message) for one assistant message."""
     section = config[channel]
-    if not section["enabled"]:
-        return {"reply": _brand_safe(DISABLED_REPLY)}, 503, "disabled", ""
-    if limiter is not None and not limiter.allow(rate_key):
-        return {"reply": _brand_safe(RATE_LIMIT_REPLY)}, 429, "rate_limited", ""
     language = _message_language(raw_message) if isinstance(raw_message, str) else "en"
+    if not section["enabled"]:
+        return {"reply": _brand_safe(_unavailable_reply(language, rate_limited=False))}, 503, "disabled", ""
+    if limiter is not None and not limiter.allow(rate_key):
+        return {"reply": _brand_safe(_unavailable_reply(language, rate_limited=True))}, 429, "rate_limited", ""
     if is_unsafe_input(raw_message):
-        if channel == "public":
+        if channel == "public" or language != "en":
             return {"reply": _public_unsafe_reply(language)}, 200, "blocked", ""
         return {"reply": _brand_safe(ILLEGAL_REPLY)}, 200, "blocked", ""
     message = sanitize_message(raw_message)
@@ -410,13 +503,18 @@ def run_chat(
     blocked = triage_and_reply(message)
     if blocked:
         if blocked["reply"] == IDENTITY_REPLY:
-            return {"reply": _brand_safe(config["identityReply"])}, 200, "identity", message
+            return {"reply": _creator_reply(language)}, 200, "identity", message
+        if language != "en":
+            return {"reply": _public_unsafe_reply(language)}, 200, "blocked", message
         return {"reply": _brand_safe(blocked["reply"])}, 200, "blocked", message
     greeting_reply = _greeting_reply(channel, role, message)
     if greeting_reply:
         return {"reply": _brand_safe(greeting_reply)}, 200, "greeting", message
     if channel == "public":
         lowered = message.lower()
+        localized = _localized_topic_reply(language, message)
+        if localized:
+            return {"reply": _brand_safe(localized)}, 200, "answered", message
         if any(term in lowered for term in ("commission", "income", "earnings", "earning", "profit", "kamaai")):
             return {
                 "reply": _brand_safe(
@@ -436,8 +534,13 @@ def run_chat(
             else:
                 reply = "Interested in joining? Choose Retailer or Distributor and submit an application to get started."
             return {"reply": _brand_safe(reply)}, 200, "sales_application", message
+    elif language != "en":
+        return {"reply": _brand_safe(_portal_language_reply(language, role))}, 200, "fallback", message
     entry = best_entry(message, section["knowledge"], role if channel == "portal" else None)
     if entry:
+        if language != "en":
+            reply = _public_scope_reply(language) if channel == "public" else _portal_language_reply(language, role)
+            return {"reply": _brand_safe(reply)}, 200, "fallback", message
         return {"reply": _brand_safe(entry["answer"])}, 200, "answered", message
     if channel == "public":
         reply = _public_scope_reply(language) if language != "en" else section["refusalMessage"]

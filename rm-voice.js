@@ -21,6 +21,7 @@
     let activeObjectUrl = "";
     let playbackVersion = 0;
     let activeEndCallback = null;
+    let pendingSpeech = null;
 
     function detectLanguage(text) {
         const value = String(text || "");
@@ -71,9 +72,14 @@
 
     function stop() {
         playbackVersion += 1;
+        pendingSpeech = null;
         const finish = activeEndCallback;
         activeEndCallback = null;
-        if (browserSpeechSupported()) { window.speechSynthesis.cancel(); }
+        if (browserSpeechSupported()) {
+            window.speechSynthesis.pause();
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.resume();
+        }
         releaseAudio();
         if (finish) { finish(); }
     }
@@ -127,6 +133,8 @@
 
                 activeObjectUrl = URL.createObjectURL(audioBlob);
                 const audio = new Audio(activeObjectUrl);
+                audio.preload = "auto";
+                audio.volume = 0.92;
                 activeAudio = audio;
                 let started = false;
                 function finish() {
@@ -142,6 +150,7 @@
                 audio.addEventListener("ended", finish, { once: true });
                 audio.addEventListener("error", finish, { once: true });
                 await audio.play();
+                if (currentPlayback !== playbackVersion) { return false; }
                 announceStart();
                 return true;
             } catch (error) {
@@ -159,15 +168,17 @@
         const lang = own !== FALLBACK ? own : lastQueryLang;
         const utterance = new SpeechSynthesisUtterance(clean);
         utterance.lang = lang;
-        utterance.rate = 1;
+        utterance.rate = lang === "bn-IN" ? 0.91 : 0.94;
         utterance.pitch = 1;
-        utterance.volume = 1;
+        utterance.volume = 0.92;
         const voice = pickVoice(lang);
         if (voice) { utterance.voice = voice; }
         if (config.onStart) { utterance.onstart = config.onStart; }
         utterance.onend = finishPlayback;
         utterance.onerror = finishPlayback;
         try {
+            pendingSpeech = utterance;
+            window.speechSynthesis.cancel();
             window.speechSynthesis.speak(utterance);
         } catch (error) {
             finishPlayback();
@@ -177,7 +188,10 @@
     }
 
     function noteUserQuery(text) {
-        lastQueryLang = detectLanguage(text);
+        const detected = detectLanguage(text);
+        if (detected !== FALLBACK || /[a-z]/i.test(String(text || ""))) {
+            lastQueryLang = detected;
+        }
     }
 
     if (browserSpeechSupported()) {

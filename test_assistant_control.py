@@ -85,8 +85,43 @@ class PublicChatTests(unittest.TestCase):
             with self.subTest(message=message):
                 body, _, outcome, _ = self.ask(message)
                 self.assertEqual(outcome, "identity")
-                self.assertEqual(body["reply"], self.config["identityReply"])
-                self.assertIn("exclusively designed, built and branded for R.M. Digital Centre", body["reply"])
+                self.assertIn("owner and creator", body["reply"].lower())
+                self.assertIn("Boss", body["reply"])
+
+    def test_creator_answers_follow_the_users_language(self):
+        for message, marker in (
+            ("who is the boss?", "owner and creator"),
+            ("মালিক কে?", "মালিক ও স্রষ্টাই"),
+            ("বস কে?", "মালিক ও স্রষ্টাই"),
+            ("बॉस कौन है?", "मालिक और सृष्टिकर्ता"),
+        ):
+            with self.subTest(message=message):
+                body, status, outcome, _ = self.ask(message)
+                self.assertEqual((status, outcome), (200, "identity"))
+                self.assertIn(marker, body["reply"])
+
+    def test_portal_replies_follow_the_users_language(self):
+        for message, role, marker in (
+            ("কেমন কাজ হচ্ছে?", "master", "workspace"),
+            ("मुझे मदद चाहिए", "masteradmin", "workspace"),
+        ):
+            with self.subTest(message=message):
+                body, status, outcome, _ = run_chat("portal", message, self.config, role=role)
+                self.assertEqual(status, 200)
+                self.assertIn(marker, body["reply"])
+
+    def test_localized_greeting_and_unmatched_knowledge(self):
+        cases = (
+            ("public", "নমস্কার", "bn", None),
+            ("portal", "নমস্কার", "bn", "retailer"),
+            ("public", "রিচার্জের bill চাই", "bn", None),
+            ("public", "मुझे login चाहिए", "hi", None),
+        )
+        for channel, message, language, role in cases:
+            with self.subTest(message=message):
+                reply = run_chat(channel, message, self.config, role=role)[0]["reply"]
+                script = r"[\u0980-\u09ff]" if language == "bn" else r"[\u0900-\u097f]"
+                self.assertRegex(reply, script)
 
     def test_malicious_and_injection_blocked(self):
         body, _, outcome, _ = self.ask("how to hack the portal")
@@ -130,6 +165,15 @@ class PublicChatTests(unittest.TestCase):
         limiter = RateLimiter(limit=1, window_seconds=60)
         self.assertEqual(self.ask("hi", limiter=limiter, rate_key="ip")[1], 200)
         self.assertEqual(self.ask("hi", limiter=limiter, rate_key="ip")[1], 429)
+
+    def test_unavailable_responses_follow_message_language(self):
+        self.config["public"]["enabled"] = False
+        self.assertRegex(self.ask("নমস্কার")[0]["reply"], r"[\u0980-\u09ff]")
+        self.config["public"]["enabled"] = True
+        limiter = RateLimiter(limit=0)
+        reply, status, _, _ = self.ask("नमस्ते", limiter=limiter, rate_key="ip")
+        self.assertEqual(status, 429)
+        self.assertRegex(reply["reply"], r"[\u0900-\u097f]")
 
     def test_owner_edits_take_effect(self):
         self.config["public"]["knowledge"].append(

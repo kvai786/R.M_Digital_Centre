@@ -104,6 +104,45 @@ class InputValidationTests(unittest.TestCase):
         self.assertIn("নমস্কার!", response.json()["reply"])
         self.assertNotIn("Sorry, I could not respond right now.", response.json()["reply"])
 
+    def test_homepage_design_drafts_are_owner_gated(self):
+        draft = server.HomepageDesignInput(
+            approved=False, theme="festive", startsAt="2026-11-01", endsAt="2026-12-01",
+            fontRotation=True,
+        ).model_dump()
+        approved = server.HomepageDesignInput(**{**draft, "approved": True}).model_dump()
+        self.assertEqual(
+            server.public_homepage_design(draft, server.datetime(2026, 11, 19)),
+            {"theme": "standard", "fontRotation": False, "font": "system"},
+        )
+        visible = server.public_homepage_design(approved, server.datetime(2026, 11, 19))
+        self.assertEqual(visible["theme"], "festive")
+        self.assertTrue(visible["fontRotation"])
+        self.assertIn(visible["font"], {"system", "humanist", "rounded", "classic"})
+
+    def test_homepage_design_rejects_unknown_theme(self):
+        with self.assertRaises(ValidationError):
+            server.HomepageDesignInput(theme="custom-html")
+        with TestClient(server.app) as client:
+            response = client.get(
+                "/api/public/homepage-design",
+                headers={"Origin": "http://testserver"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["theme"], "standard")
+
+    def test_font_rotation_changes_at_48_hour_utc_boundaries(self):
+        config = server.HomepageDesignInput(approved=True, fontRotation=True).model_dump()
+        start = server.datetime(2026, 11, 19, tzinfo=server.timezone.utc)
+        # Find the start of the current epoch-aligned 48-hour period.
+        start = server.datetime.fromtimestamp(
+            int(start.timestamp() // 172800) * 172800, tz=server.timezone.utc,
+        )
+        first = server.public_homepage_design(config, start)["font"]
+        before = server.public_homepage_design(config, start + server.timedelta(hours=48, seconds=-1))["font"]
+        after = server.public_homepage_design(config, start + server.timedelta(hours=48))["font"]
+        self.assertEqual(first, before)
+        self.assertNotEqual(first, after)
+
 
 if __name__ == "__main__":
     unittest.main()

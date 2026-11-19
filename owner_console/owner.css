@@ -36,6 +36,10 @@ h2 { margin: 16px 0 8px; font-size: 17px; color: var(--oc-gold); }
     padding: 12px 24px;
     background: linear-gradient(90deg, #0b1220, #1a1405);
     border-bottom: 1px solid var(--oc-gold);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
 }
 
 .oc-brand { display: flex; align-items: center; gap: 12px; }
@@ -88,21 +92,33 @@ h2 { margin: 16px 0 8px; font-size: 17px; color: var(--oc-gold); }
 
 .oc-tabs button[aria-selected="true"], .oc-subtabs button[aria-selected="true"] { color: var(--oc-gold); border-bottom-color: var(--oc-gold); }
 
-.oc-main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+.oc-main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
 .oc-hint { color: var(--oc-muted); margin: 4px 0 12px; }
 
 .oc-status { padding: 10px 14px; border-radius: 8px; background: #052e1c; border: 1px solid var(--oc-ok); }
 .oc-status.error { background: #3b0a16; border-color: var(--oc-danger); }
 .oc-status[hidden] { display: none; }
 
-.oc-card { padding: 16px; margin: 0 0 16px; background: var(--oc-panel); border: 1px solid var(--oc-line); border-radius: 12px; }
+.oc-card {
+    padding: 18px;
+    margin: 0 0 16px;
+    background: linear-gradient(145deg, var(--oc-panel), #121d31);
+    border: 1px solid var(--oc-line);
+    border-radius: 14px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+}
 .oc-card[hidden], [data-panel][hidden], [data-subpanel][hidden] { display: none; }
 .oc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; align-items: end; }
 .oc-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin: 0 0 12px; }
 .oc-scroll { overflow-x: auto; }
 
 .oc-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
-.oc-stat { padding: 14px; background: var(--oc-panel); border: 1px solid var(--oc-line); border-radius: 12px; }
+.oc-stat {
+    padding: 16px;
+    background: linear-gradient(145deg, var(--oc-panel), var(--oc-panel-2));
+    border: 1px solid var(--oc-line);
+    border-radius: 14px;
+}
 .oc-stat span { display: block; color: var(--oc-muted); font-size: 13px; }
 .oc-stat strong { font-size: 26px; color: var(--oc-cyan); }
 button.oc-stat { text-align: left; font: inherit; color: inherit; cursor: pointer; }
@@ -125,7 +141,10 @@ label input, label select, label textarea, .oc-field {
     background: var(--oc-panel-2);
     color: var(--oc-text);
     font: inherit;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
 }
+
+label input:hover, label select:hover, label textarea:hover { border-color: #3b526f; }
 
 label textarea { resize: vertical; }
 .oc-check { display: flex; align-items: center; gap: 8px; color: var(--oc-text); font-size: 14px; }

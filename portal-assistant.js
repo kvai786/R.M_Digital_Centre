@@ -49,10 +49,14 @@
         if (!user) { return; }
 
         const ownerAssistant = user.role === "master";
-        const fab = el("button", "rm-bot rm-portal-fab" + (ownerAssistant ? " rm-supreme-fab" : ""), "\uD83D\uDCAC");
+        const root = el("div", "rm-bot rm-portal-root");
+        const fab = el("button", "rm-portal-fab" + (ownerAssistant ? " rm-supreme-fab" : ""), "\uD83D\uDCAC");
         fab.type = "button";
         fab.setAttribute("aria-label", "Open assistant");
         fab.setAttribute("aria-expanded", "false");
+        const badge = el("span", "rm-brand-badge", "R.M");
+        badge.setAttribute("aria-hidden", "true");
+        fab.append(badge);
         const panel = el("div", "rm-chat-panel" + (ownerAssistant ? " rm-supreme-chat-panel" : ""));
         panel.hidden = true;
         panel.setAttribute("role", "dialog");
@@ -77,7 +81,8 @@
         send.type = "submit";
         form.append(input, send);
         panel.append(head, log, form);
-        document.body.append(fab, panel);
+        root.append(fab);
+        document.body.append(root, panel);
 
         function addMessage(text, who) {
             const message = el("div", "rm-chat-msg " + who);

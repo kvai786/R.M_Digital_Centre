@@ -32,14 +32,19 @@
     async function ask(message) {
         const response = await fetch("/api/chat", {
             method: "POST",
-            credentials: "same-origin",
+            credentials: "omit",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ message: message }),
         });
-        const data = await response.json().catch(function () { return {}; });
+        const data = await response.json();
+        if (!response.ok && typeof data.reply !== "string") {
+            throw new Error(data.detail || "Assistant request failed.");
+        }
+        if (typeof data.reply !== "string") {
+            throw new Error("Assistant returned an invalid response.");
+        }
         return {
-            reply: typeof data.reply === "string" ? data.reply :
-                "Please ask about our services or a Retailer or Distributor ID.",
+            reply: data.reply,
             speechToken: data.speechToken,
             speechExpiresAt: data.speechExpiresAt,
         };
@@ -57,6 +62,9 @@
         fab.setAttribute("aria-label", "Chat with the R.M. Digital Centre assistant");
         fab.setAttribute("aria-expanded", "false");
         fab.innerHTML = ROBOT_SVG;
+        const badge = el("span", "rm-brand-badge", "R.M");
+        badge.setAttribute("aria-hidden", "true");
+        fab.append(badge);
         root.append(bubble, fab);
 
         const panel = el("div", "rm-chat-panel");
@@ -102,6 +110,7 @@
         }
 
         async function submit(text) {
+            if (send.disabled) { return; }
             if (window.RMVoice) { window.RMVoice.noteUserQuery(text); }
             addMessage(text, "user");
             send.disabled = true;
@@ -109,7 +118,13 @@
                 const answer = await ask(text);
                 addMessage(answer.reply, "bot", answer);
             } catch (error) {
-                addMessage("The assistant is unavailable right now. Please try again shortly.", "bot");
+                console.error("Visitor assistant request failed.", error);
+                const unavailable = /[\u0980-\u09ff]/.test(text)
+                    ? "সহকারী এখন উপলব্ধ নয়। অনুগ্রহ করে কিছুক্ষণ পরে আবার চেষ্টা করুন।"
+                    : /[\u0900-\u097f]/.test(text)
+                        ? "सहायक अभी उपलब्ध नहीं है। कृपया थोड़ी देर बाद फिर कोशिश करें।"
+                        : "The assistant is unavailable right now. Please try again shortly.";
+                addMessage(unavailable, "bot");
             } finally {
                 send.disabled = false;
                 input.focus();
@@ -139,7 +154,7 @@
         form.addEventListener("submit", function (event) {
             event.preventDefault();
             const text = input.value.trim();
-            if (!text) { return; }
+            if (!text || send.disabled) { return; }
             input.value = "";
             submit(text);
         });

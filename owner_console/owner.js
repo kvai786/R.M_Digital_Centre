@@ -703,10 +703,58 @@
         notify(body.enabled ? "Growth campaign saved. It will show only within the configured dates." : "Growth campaign saved as a draft.");
     }
 
+    function homepageDesignBody() {
+        return {
+            approved: $("design-approved").checked,
+            theme: $("design-theme").value,
+            startsAt: $("design-start").value,
+            endsAt: $("design-end").value,
+            fontRotation: $("design-font-rotation").checked,
+        };
+    }
+
+    async function loadHomepageDesign() {
+        const data = await guarded(() => api("/api/supreme/homepage-design"));
+        if (!data) return;
+        const config = data.config;
+        $("design-approved").checked = config.approved;
+        $("design-theme").value = config.theme;
+        $("design-start").value = config.startsAt;
+        $("design-end").value = config.endsAt;
+        $("design-font-rotation").checked = config.fontRotation;
+    }
+
+    async function saveHomepageDesign(event) {
+        event.preventDefault();
+        const body = homepageDesignBody();
+        const data = await guarded(() => api("/api/supreme/homepage-design", { method: "PUT", body }));
+        if (!data) return;
+        notify(data.config.approved
+            ? "Homepage design approved for the selected dates."
+            : "Homepage design saved privately as an owner draft.");
+    }
+
+    function previewHomepageDesign() {
+        const body = homepageDesignBody();
+        const preview = {
+            theme: body.theme,
+            font: "system",
+            fontRotation: body.fontRotation,
+        };
+        const previewWindow = window.open("about:blank", "_blank");
+        if (!previewWindow) {
+            notify("Allow pop-ups to preview the homepage design.", true);
+            return;
+        }
+        previewWindow.sessionStorage.setItem("rm-homepage-preview", JSON.stringify(preview));
+        previewWindow.opener = null;
+        previewWindow.location.replace("/index.html?design-preview=1");
+    }
+
     const loaders = {
         overview: loadOverview, staff: loadStaff, security: loadSecurity, tickets: loadTickets,
         logs: () => loadLogs(false), database: loadDatabase, documents: loadDocuments,
-        growth: loadGrowthCampaign, ai: loadAi,
+        growth: loadGrowthCampaign, design: loadHomepageDesign, ai: loadAi,
     };
 
     async function init() {
@@ -732,6 +780,11 @@
             if (done) { form.reset(); notify(done.message); loadDocuments(); }
         });
         $("campaign-form").addEventListener("submit", saveGrowthCampaign);
+        $("homepage-design-form").addEventListener("submit", saveHomepageDesign);
+        $("design-preview").addEventListener("click", previewHomepageDesign);
+        ["design-theme", "design-start", "design-end", "design-font-rotation"].forEach((id) => {
+            $(id).addEventListener("change", () => { $("design-approved").checked = false; });
+        });
 
         $("staff-form").addEventListener("submit", async (event) => {
             event.preventDefault();

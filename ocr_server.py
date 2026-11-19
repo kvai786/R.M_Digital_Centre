@@ -129,6 +129,7 @@ TICKET_STATUSES = ("open", "in_progress", "closed")
 OWNER_ALERTS_KEY = "rm-owner-alerts"
 COMMISSION_KEY = "rm-commission-slabs"
 GROWTH_CAMPAIGN_KEY = "rm-growth-campaign"
+HOMEPAGE_DESIGN_KEY = "rm-homepage-design"
 GROWTH_CAMPAIGN_TARGET = 600
 # Identifier-only lockout is opt-in; the owner's own number is exempt so it cannot be used to lock the owner out.
 ACCOUNT_LOCKOUT_ENABLED = os.getenv("ACCOUNT_LOCKOUT_ENABLED", "0").lower() in {"1", "true", "yes"}
@@ -148,7 +149,7 @@ STATIC_FILES = {
     "index.html", "login.html", "register.html", "admin.html", "retailer.html",
     "dashboard.html", "dashboard.css", "dashboard.js",
     "styles.css", "app.js", "admin-step-up.js", "admin-step-up.css",
-    "home-services.js", "campaign.js", "manifest.json", "sw.js", "icon.svg",
+    "home-services.js", "home-design.js", "campaign.js", "manifest.json", "sw.js", "icon.svg",
     "icon-192.png", "icon-512.png", "assistant.css", "public-assistant.js", "portal-assistant.js",
         "rm-voice.js", "track.html", "track.js", "commission.html", "commission.js",
     "compliance.html", "compliance.js", "credentials.json", "terms.html", "privacy.html", "refund.html",
@@ -3610,6 +3611,32 @@ class GrowthCampaignInput(InputModel):
     endsAt: str = Field(default="", max_length=10)
 
 
+class HomepageDesignInput(InputModel):
+    approved: bool = False
+    theme: str = Field(default="standard", max_length=20)
+    startsAt: str = Field(default="", max_length=10)
+    endsAt: str = Field(default="", max_length=10)
+    fontRotation: bool = True
+
+    @field_validator("theme")
+    @classmethod
+    def validate_theme(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if cleaned not in {"standard", "festive", "monsoon", "summer", "winter", "trend"}:
+            raise ValueError("Choose a supported homepage design.")
+        return cleaned
+
+    @field_validator("startsAt", "endsAt")
+    @classmethod
+    def validate_design_date(cls, value: str) -> str:
+        if not value:
+            return ""
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+        except ValueError as error:
+            raise ValueError("Use dates in YYYY-MM-DD format.") from error
+
+
 def default_growth_campaign() -> dict[str, Any]:
     return GrowthCampaignInput(
         title="Retailer and Distributor onboarding",
@@ -3618,6 +3645,43 @@ def default_growth_campaign() -> dict[str, Any]:
             "and current AEPS/DMT commission slabs. Eligibility and service-area coverage apply."
         ),
     ).model_dump()
+
+
+def default_homepage_design() -> dict[str, Any]:
+    return HomepageDesignInput().model_dump()
+
+
+def load_homepage_design(db: Session) -> dict[str, Any]:
+    row = db.get(PortalRecord, HOMEPAGE_DESIGN_KEY)
+    if row is None:
+        return default_homepage_design()
+    try:
+        return HomepageDesignInput.model_validate(row.value).model_dump()
+    except ValidationError:
+        LOGGER.warning("Ignoring invalid homepage design configuration.")
+        return default_homepage_design()
+
+
+def public_homepage_design(config: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    if not config["approved"]:
+        return {"theme": "standard", "fontRotation": False, "font": "system"}
+    moment = now or utc_now()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    moment = moment.astimezone(UTC)
+    current = moment.date().isoformat()
+    if (config["startsAt"] and current < config["startsAt"]) or (config["endsAt"] and current > config["endsAt"]):
+        return {"theme": "standard", "fontRotation": False, "font": "system"}
+    if config["fontRotation"]:
+        fonts = ("system", "humanist", "rounded", "classic")
+        font = fonts[int(moment.timestamp() // 172800) % len(fonts)]
+    else:
+        font = "system"
+    return {
+        "theme": config["theme"],
+        "fontRotation": config["fontRotation"],
+        "font": font,
+    }
 
 
 def load_growth_campaign(db: Session) -> dict[str, Any]:
@@ -3763,6 +3827,12 @@ def synthesize_elevenlabs(text_value: str, language: str) -> Response:
         "text": text_value,
         "model_id": "eleven_v4",
         "language_code": language,
+        "voice_settings": {
+            "stability": 0.72,
+            "similarity_boost": 0.78,
+            "style": 0.18,
+            "use_speaker_boost": True,
+        },
     }).encode()
     provider_request = URLRequest(
         url,
@@ -3822,7 +3892,13 @@ def public_assistant_chat(
             "portal", payload.message, config, limiter=ASSISTANT_LIMITER, rate_key=str(user.id), role=user.role,
         )
         if user.role == "master" and status == 200 and outcome != "greeting":
-            body["reply"] = sanitize_output("Namaskar Sir. " + body["reply"])
+            if re.search(r"[\u0980-\u09FF]", body["reply"]):
+                prefix = "নমস্কার Boss! "
+            elif re.search(r"[\u0900-\u097F]", body["reply"]):
+                prefix = "नमस्कार Boss! "
+            else:
+                prefix = "Namaskar Sir. "
+            body["reply"] = sanitize_output(prefix + body["reply"])
         log_ai_event(db, config, "portal", user.id, user.role, message, body["reply"], outcome)
         return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
 
@@ -3830,7 +3906,12 @@ def public_assistant_chat(
         "public", payload.message, config, limiter=PUBLIC_ASSISTANT_LIMITER, rate_key=remote,
     )
     if outcome == "sales_application" and growth_campaign_is_active(load_growth_campaign(db)):
-        body["reply"] += " See the current onboarding offer and role-specific application links on our homepage."
+        if re.search(r"[\u0980-\u09FF]", body["reply"]):
+            body["reply"] += " বর্তমান onboarding offer ও application links homepage-এ দেখুন।"
+        elif re.search(r"[\u0900-\u097F]", body["reply"]):
+            body["reply"] += " मौजूदा onboarding offer और application links homepage पर देखें।"
+        else:
+            body["reply"] += " See the current onboarding offer and role-specific application links on our homepage."
     if status == 200 and body.get("reply"):
         expires_at = int(utc_now().timestamp()) + SPEECH_TOKEN_TTL_SECONDS
         body["speechToken"] = public_speech_signature(body["reply"], remote, expires_at)
@@ -3852,6 +3933,11 @@ def public_growth_campaign(db: Session = Depends(get_db)) -> dict[str, Any]:
     }
 
 
+@app.get("/api/public/homepage-design")
+def public_homepage_design_settings(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return public_homepage_design(load_homepage_design(db))
+
+
 @app.post("/api/public/assistant/speech")
 def public_assistant_speech(
     body: PublicSpeechInput, request: Request, db: Session = Depends(get_db),
@@ -3869,7 +3955,9 @@ def public_assistant_speech(
         raise HTTPException(status_code=503, detail="The public assistant is temporarily unavailable.")
     if not SPEECH_GLOBAL_LIMITER.allow("global"):
         raise HTTPException(status_code=429, detail="Speech is temporarily busy. Try again shortly.")
-    language = "bn" if re.search(r"[\u0980-\u09FF]", body.text) else "en"
+    language = "bn" if re.search(r"[\u0980-\u09FF]", body.text) else (
+        "hi" if re.search(r"[\u0900-\u097F]", body.text) else "en"
+    )
     return synthesize_elevenlabs(body.text, language)
 
 
@@ -3893,7 +3981,9 @@ def owner_assistant_speech(
         raise HTTPException(status_code=429, detail="Too many speech requests. Try again shortly.")
     if not SPEECH_GLOBAL_LIMITER.allow("global"):
         raise HTTPException(status_code=429, detail="Speech is temporarily busy. Try again shortly.")
-    language = "bn" if re.search(r"[\u0980-\u09FF]", body.text) else "en"
+    language = "bn" if re.search(r"[\u0980-\u09FF]", body.text) else (
+        "hi" if re.search(r"[\u0900-\u097F]", body.text) else "en"
+    )
     return synthesize_elevenlabs(body.text, language)
 
 
@@ -4269,6 +4359,37 @@ def supreme_growth_campaign_get(
         "target": GROWTH_CAMPAIGN_TARGET,
         "progress": growth_campaign_progress(db, config),
     }
+
+
+@app.get("/api/supreme/homepage-design")
+def supreme_homepage_design_get(
+    _: User = Depends(owner_only), db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    config = load_homepage_design(db)
+    return {"config": config, "preview": public_homepage_design(config)}
+
+
+@app.put("/api/supreme/homepage-design")
+def supreme_homepage_design_put(
+    body: HomepageDesignInput,
+    owner: User = Depends(owner_only),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    config = body.model_dump()
+    if config["startsAt"] and config["endsAt"] and config["endsAt"] < config["startsAt"]:
+        raise HTTPException(status_code=422, detail="Design end date cannot be before the start date.")
+    row = db.get(PortalRecord, HOMEPAGE_DESIGN_KEY)
+    if row is None:
+        db.add(PortalRecord(key=HOMEPAGE_DESIGN_KEY, value=config))
+    else:
+        row.value = config
+        row.updated_at = utc_now()
+    record_audit(db, owner, "homepage_design_update", HOMEPAGE_DESIGN_KEY, {
+        "approved": config["approved"], "theme": config["theme"],
+        "startsAt": config["startsAt"], "endsAt": config["endsAt"],
+    })
+    db.commit()
+    return {"config": config, "preview": public_homepage_design(config)}
 
 
 @app.put("/api/supreme/growth-campaign")

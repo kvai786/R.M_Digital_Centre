@@ -129,6 +129,33 @@
     padding-left: 20px;
 }
 
+html.rm-font-humanist,
+html.rm-font-humanist body { font-family: "Segoe UI", "Trebuchet MS", Arial, sans-serif; }
+html.rm-font-rounded,
+html.rm-font-rounded body { font-family: ui-rounded, "Arial Rounded MT Bold", "Segoe UI", sans-serif; }
+html.rm-font-classic,
+html.rm-font-classic body { font-family: Georgia, "Noto Serif", serif; }
+html.rm-font-classic h1,
+html.rm-font-classic h2,
+html.rm-font-classic h3 { font-family: "Segoe UI", Arial, sans-serif; }
+
+html.rm-home-festive .hero {
+    background: linear-gradient(135deg, #240d17, #5b1d2d 48%, #13223b);
+}
+html.rm-home-festive .hero-title-highlight { color: #facc6b; }
+html.rm-home-monsoon .hero {
+    background: linear-gradient(135deg, #052a33, #075985 52%, #172554);
+}
+html.rm-home-summer .hero {
+    background: linear-gradient(135deg, #422006, #9a3412 52%, #172554);
+}
+html.rm-home-winter .hero {
+    background: linear-gradient(135deg, #111827, #334155 52%, #164e63);
+}
+html.rm-home-trend .hero {
+    background: linear-gradient(135deg, #171133, #312e81 48%, #0e7490);
+}
+
 @media (prefers-reduced-motion: reduce) {
     .hero-particles {
         display: none;
