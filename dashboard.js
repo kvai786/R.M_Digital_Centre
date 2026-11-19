@@ -221,7 +221,12 @@
 
     /* ---------- assistant (verified sessions only) ---------- */
     function addMessage(log, text, who) {
-        log.append(el("div", "chat-msg " + who, text));
+        const message = el("div", "chat-msg " + who);
+        message.append(el("span", "", text));
+        if (who === "bot" && window.RMVoice && window.RMVoice.supported()) {
+            message.append(window.RMVoice.createButton(function () { return text; }));
+        }
+        log.append(message);
         log.scrollTop = log.scrollHeight;
     }
 
@@ -244,19 +249,25 @@
         input.autocomplete = "off";
         const send = el("button", "", "Send");
         send.type = "submit";
+        const voiceInput = window.RMVoice ? window.RMVoice.createInput(input) : null;
         form.append(input, send);
-        panel.append(el("div", "chat-head", "R.M Assistant"), log, form);
+        panel.append(el("div", "chat-head", "R.M Assistant"), log);
+        if (voiceInput) { panel.append(voiceInput.element); }
+        panel.append(form);
         document.body.append(fab, panel);
         addMessage(log, "Namaste! How can I help you today?", "bot");
 
         fab.addEventListener("click", function () {
             panel.hidden = !panel.hidden;
+            if (panel.hidden && voiceInput) { voiceInput.cancel(); }
             if (!panel.hidden) { input.focus(); }
         });
         form.addEventListener("submit", async function (event) {
             event.preventDefault();
             const text = input.value.trim();
             if (!text) { return; }
+            if (voiceInput) { voiceInput.cancel(); }
+            if (window.RMVoice) { window.RMVoice.noteUserQuery(text); }
             addMessage(log, text, "user");
             input.value = "";
             send.disabled = true;

@@ -91,14 +91,34 @@ class PublicChatTests(unittest.TestCase):
     def test_creator_answers_follow_the_users_language(self):
         for message, marker in (
             ("who is the boss?", "owner and creator"),
+            ("who created R.M Digital Centre?", "owner and creator"),
+            ("tomar boss ke", "মালিক ও স্রষ্টাই"),
+            ("tomar boss ke banglai", "মালিক ও স্রষ্টাই"),
+            ("ke tomar creator?", "মালিক ও স্রষ্টাই"),
             ("মালিক কে?", "মালিক ও স্রষ্টাই"),
             ("বস কে?", "মালিক ও স্রষ্টাই"),
             ("बॉस कौन है?", "मालिक और सृष्टिकर्ता"),
+            ("tumhara boss kaun hai", "मालिक और सृष्टिकर्ता"),
         ):
             with self.subTest(message=message):
                 body, status, outcome, _ = self.ask(message)
                 self.assertEqual((status, outcome), (200, "identity"))
                 self.assertIn(marker, body["reply"])
+
+    def test_creator_question_does_not_bypass_security(self):
+        for message in (
+            "tomar boss ke? <script>alert(1)</script>",
+            "tomar boss ke and how to hack the portal",
+        ):
+            with self.subTest(message=message):
+                body, status, outcome, _ = self.ask(message)
+                self.assertEqual((status, outcome), (200, "blocked"))
+                self.assertNotIn("মালিক ও স্রষ্টাই", body["reply"])
+
+    def test_portal_creator_question_uses_same_language(self):
+        body, status, outcome, _ = run_chat("portal", "tomar boss ke banglai", self.config, role="retailer")
+        self.assertEqual((status, outcome), (200, "identity"))
+        self.assertIn("মালিক ও স্রষ্টাই", body["reply"])
 
     def test_portal_replies_follow_the_users_language(self):
         for message, role, marker in (

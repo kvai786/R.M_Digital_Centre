@@ -28,7 +28,7 @@ class TriageTests(unittest.TestCase):
 
     def test_legit_queries_pass(self):
         for query in ["Aadhaar card update kaise karein?", "water leak in my shop", "how to reset password",
-                      "injection vaccine certificate", "AEPS withdraw limit"]:
+                      "injection vaccine certificate", "AEPS withdraw limit", "boss ke retailer ID chahiye"]:
             with self.subTest(query=query):
                 self.assertIsNone(triage_and_reply(query))
 

@@ -79,8 +79,11 @@
         input.setAttribute("aria-label", "Your message");
         const send = el("button", "", "Send");
         send.type = "submit";
+        const voiceInput = window.RMVoice ? window.RMVoice.createInput(input) : null;
         form.append(input, send);
-        panel.append(head, log, form);
+        panel.append(head, log);
+        if (voiceInput) { panel.append(voiceInput.element); }
+        panel.append(form);
         root.append(fab);
         document.body.append(root, panel);
 
@@ -99,6 +102,7 @@
         }
 
         function setOpen(open) {
+            if (!open && voiceInput) { voiceInput.cancel(); }
             panel.hidden = !open;
             fab.setAttribute("aria-expanded", String(open));
             if (open) { input.focus(); } else { fab.focus(); }
@@ -112,6 +116,7 @@
             event.preventDefault();
             const text = input.value.trim();
             if (!text) { return; }
+            if (voiceInput) { voiceInput.cancel(); }
             if (window.RMVoice) { window.RMVoice.noteUserQuery(text); }
             addMessage(text, "user");
             input.value = "";

@@ -28,6 +28,13 @@ ATTACKS = ["<script>alert(1)</script>", "x' OR '1'='1", "a; DROP TABLE users", "
 
 
 class InputValidationTests(unittest.TestCase):
+    def test_microphone_permission_is_limited_to_assistant_pages(self):
+        with TestClient(server.app) as client:
+            homepage = client.get("/index.html")
+            other = client.get("/login.html")
+        self.assertIn("microphone=(self)", homepage.headers["permissions-policy"])
+        self.assertIn("microphone=()", other.headers["permissions-policy"])
+
     def test_clean_application_passes(self):
         self.assertEqual(server.ApplicationInput(**APPLICATION).name, "Rahim Mondal")
 
@@ -103,6 +110,15 @@ class InputValidationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("নমস্কার!", response.json()["reply"])
         self.assertNotIn("Sorry, I could not respond right now.", response.json()["reply"])
+
+    def test_unified_chat_returns_utf8_creator_reply_for_bengali_transliteration(self):
+        with TestClient(server.app) as client:
+            response = client.post(
+                "/api/chat", json={"message": "tomar boss ke banglai"},
+                headers={"Origin": "http://testserver"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("মালিক ও স্রষ্টাই", response.content.decode("utf-8"))
 
     def test_homepage_design_drafts_are_owner_gated(self):
         draft = server.HomepageDesignInput(

@@ -1391,7 +1391,10 @@ async def security_middleware(request: Request, call_next):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        assistant_pages = {"/", "/index.html", "/admin.html", "/retailer.html",
+                           "/dashboard", "/dashboard.html", "/supreme-owner"}
+        microphone = "(self)" if request.url.path in assistant_pages else "()"
+        response.headers["Permissions-Policy"] = f"camera=(), microphone={microphone}, geolocation=()"
         response.headers.setdefault("Content-Security-Policy", (
             "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
             "connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"

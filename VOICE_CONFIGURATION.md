@@ -12,3 +12,5 @@ Configure these environment variables in the server deployment:
 The server uses the `eleven_v4` model and requests bounded MP3 audio. Public speech tokens are limited to the exact reply, client IP, and a 90-second expiration. Public speech is limited to 5 requests per client IP per minute; owner speech is limited to 5 per owner per minute, with a shared service ceiling of 30 per minute.
 
 If ElevenLabs is not configured or is temporarily unavailable, the browser helper falls back to the device's built-in speech synthesis when available. The owner greeting endpoint remains restricted to an authenticated Super Admin session.
+
+Voice input is available only in browsers supporting Web Speech recognition and requires a secure context and microphone permission. Users choose Bengali, Hindi, or English before recording. Recognition may send audio to the browser's speech service; the transcript is not sent to the assistant until the user presses Send.

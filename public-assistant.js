@@ -90,8 +90,11 @@
         input.setAttribute("aria-label", "Your message");
         const send = el("button", "", "Send");
         send.type = "submit";
+        const voiceInput = window.RMVoice ? window.RMVoice.createInput(input) : null;
         form.append(input, send);
-        panel.append(head, log, chips, form);
+        panel.append(head, log, chips);
+        if (voiceInput) { panel.append(voiceInput.element); }
+        panel.append(form);
         document.body.append(root, panel);
 
         function addMessage(text, who, speech) {
@@ -132,6 +135,7 @@
         }
 
         function setOpen(open) {
+            if (!open && voiceInput) { voiceInput.cancel(); }
             panel.hidden = !open;
             bubble.hidden = true;
             fab.setAttribute("aria-expanded", String(open));
@@ -155,6 +159,7 @@
             event.preventDefault();
             const text = input.value.trim();
             if (!text || send.disabled) { return; }
+            if (voiceInput) { voiceInput.cancel(); }
             input.value = "";
             submit(text);
         });

@@ -31,6 +31,12 @@ IDENTITY_PATTERNS = [
     r"(?i)\b(who|kaun|ke)\s+(is|hai|the)\s+(the\s+)?boss\b",
     r"(?i)\bwho\s+(?:is|are)\s+(?:your|the)\s+boss\b",
     r"(?i)\bboss\s+(who|kaun|kis|name|details)\b",
+    r"(?i)\b(?:tomar|tumar|apnar)\s+(?:boss|owner|creator|founder)\s+ke\b",
+    r"(?i)\bboss\s+ke(?:\s+(?:bangla|banglai|banglay))?\s*[?.!]*$",
+    r"(?i)\bke\s+(?:tomar|tumar|apnar)\s+(?:boss|owner|creator)\b",
+    r"(?i)\bwho\s+(?:is|are)\s+(?:the\s+)?(?:owner|creator|founder)\b",
+    r"(?i)\bwho\s+(?:created|made|founded|owns|built)\s+(?:the\s+)?"
+    r"(?:assistant|system|r\.?m\.?\s*digital\s*cent(?:re|er))\b",
     r"(?i)\b(ke\s+created|ke\s+made|কে\s+তৈরি|কারা\s+তৈরি|মালিক\s+কে)\b",
     r"মালিক\s*কে[?]?$",
     r"(?:বস|মালিক|স্রষ্টা|নির্মাতা)\s*(?:কে|কারা)",

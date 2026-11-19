@@ -282,6 +282,10 @@ def _message_language(message: str) -> str:
         return "bn"
     if re.search(r"[\u0900-\u097f]", message):
         return "hi"
+    if re.search(r"\b(?:tomar|tumar|apnar|bangla|banglai|banglay|bengali)\b", folded):
+        return "bn"
+    if re.search(r"\b(?:tumhara|tumhare|aapka|aapke|kaun|kisne|hindi)\b", folded):
+        return "hi"
     if any(
         phrase in folded
         for phrase in (
