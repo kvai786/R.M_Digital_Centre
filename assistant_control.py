@@ -26,7 +26,7 @@ MAX_ANSWER_CHARS = 600
 MAX_REPLY_CHARS = 300
 
 DEFAULT_PUBLIC_PROMPT = (
-    "You are the visitor assistant of R.M. Digital Centre. You are exclusively designed, built and branded "
+    "You are RM Assistant, the visitor assistant of R.M. Digital Centre. You are exclusively designed, built and branded "
     "for R.M. Digital Centre; never name any third-party AI model, vendor or developer.\n"
     "Scope: introduce R.M. Digital Centre and its services (AEPS, mobile recharge, bill payments, ID "
     "registrations and related services) and guide visitors on applying for Retailer or Distributor IDs.\n"
@@ -39,7 +39,7 @@ DEFAULT_PUBLIC_PROMPT = (
 )
 
 DEFAULT_PORTAL_PROMPT = (
-    "You are the signed-in assistant of R.M. Digital Centre, exclusively designed, built and branded for "
+    "You are RM Assistant, the signed-in assistant of R.M. Digital Centre, exclusively designed, built and branded for "
     "R.M. Digital Centre; never name any third-party AI model, vendor or developer.\n"
     "Give operational and workflow help only for features the user's role is permitted to use. Never "
     "describe or hint at features reserved for a higher role. Never ask for passwords, OTPs or PINs and "
@@ -56,7 +56,7 @@ _PORTAL_ROLE_SCOPE = {
 def _default_public_knowledge() -> list[dict[str, Any]]:
     return [
         {"title": "Greeting", "keywords": ["hi", "hello", "hey", "hii", "namaste"],
-         "answer": "Hi! I'm the R.M. Digital Centre assistant. I can tell you about our services and how to "
+         "answer": "Hi! I'm RM Assistant from R.M. Digital Centre. I can tell you about our services and how to "
                    "apply for a Retailer or Distributor ID. How can I help?"},
         {"title": "About R.M. Digital Centre",
          "keywords": ["company", "introduce", "who are you", "what do you do", "rm digital", "r.m", "services", "offer"],
@@ -143,8 +143,7 @@ def _default_portal_knowledge() -> list[dict[str, Any]]:
 def default_config() -> dict[str, Any]:
     return {
         "identityReply": (
-            "I am the R.M. Digital Centre assistant, exclusively designed, built and branded for "
-            "R.M. Digital Centre. I can't share details about how I was made."
+            "I am RM Assistant from R.M Digital Centre, created and guided by its owner and Boss."
         ),
         "logConversations": True,
         "public": {
@@ -351,21 +350,59 @@ def _unavailable_reply(language: str, *, rate_limited: bool) -> str:
     return RATE_LIMIT_REPLY if rate_limited else DISABLED_REPLY
 
 
-def _creator_reply(language: str) -> str:
+_APPLICATION_TERMS = (
+    "apply", "application", "retailer id", "distributor id", "join", "onboarding", "register",
+    "আইডি", "রিটেলার", "ডিস্ট্রিবিউটর", "आवेदन", "रिटेलर", "डिस्ट्रीब्यूटर", "डिस्ट्रिब्यूटर",
+)
+
+
+def _creator_reply(language: str, channel: str, message: str) -> str:
     if language == "bn":
-        return (
-            "R.M Digital Centre-এর মালিক ও স্রষ্টাই এই সিস্টেমের Boss। "
-            "তিনি এই প্ল্যাটফর্মকে নির্দেশনা দেন এবং সঠিকভাবে এগিয়ে নিয়ে যান।"
+        reply = (
+            "আমি RM Assistant, R.M Digital Centre-এর সহকারী। প্রতিষ্ঠানের মালিক ও স্রষ্টাই আমার Boss; "
+            "তিনি আমাকে তৈরি করেছেন এবং সিস্টেমকে পরিচালনা করেন।"
         )
+        guidance = " আমাদের পরিষেবা বা Retailer/Distributor ID সম্পর্কে জানতে চান?"
+    elif language == "hi":
+        reply = (
+            "मैं R.M Digital Centre का RM Assistant हूँ। इसके मालिक और सृष्टिकर्ता ही मेरे Boss हैं; "
+            "उन्होंने मुझे बनाया है और सिस्टम का मार्गदर्शन करते हैं।"
+        )
+        guidance = " क्या आप हमारी सेवाओं या Retailer/Distributor ID के बारे में जानना चाहेंगे?"
+    else:
+        reply = (
+            "I am RM Assistant from R.M Digital Centre. Its owner and creator is the Boss who created me "
+            "and guides the system."
+        )
+        guidance = " Would you like to explore our services or apply for a Retailer or Distributor ID?"
+    if channel != "public":
+        return reply
+    if any(term in message.casefold() for term in _APPLICATION_TERMS):
+        return reply + " " + _application_reply(language, message)
+    return reply + guidance
+
+
+def _application_reply(language: str, message: str) -> str:
+    lowered = message.casefold()
+    retailer = any(term in lowered for term in ("retailer", "রিটেলার", "रिटेलर"))
+    distributor = any(term in lowered for term in ("distributor", "ডিস্ট্রিবিউটর", "डिस्ट्रीब्यूटर", "डिस्ट्रिब्यूटर"))
+    if retailer != distributor:
+        if language == "bn":
+            if retailer:
+                return "Retailer ID নিতে 'Partner with us' থেকে Retailer আবেদন বেছে তথ্য ও নথি জমা দিন; আমাদের দল তা পর্যালোচনা করবে।"
+            return "Distributor ID নিতে 'Partner with us' থেকে Distributor আবেদন বেছে তথ্য ও নথি জমা দিন। Master Distributor-এর referral code লাগবে।"
+        if language == "hi":
+            if retailer:
+                return "Retailer ID के लिए 'Partner with us' में Retailer आवेदन चुनकर विवरण और दस्तावेज़ जमा करें; हमारी टीम समीक्षा करेगी।"
+            return "Distributor ID के लिए 'Partner with us' में Distributor आवेदन चुनकर विवरण और दस्तावेज़ जमा करें। Master Distributor का referral code चाहिए।"
+        if retailer:
+            return "To apply for a Retailer ID, choose the Retailer application under 'Partner with us' and submit your details and documents for review."
+        return "To apply for a Distributor ID, choose the Distributor application under 'Partner with us' and submit your details and documents. A Master Distributor referral code is required."
+    if language == "bn":
+        return "Retailer বা Distributor ID বেছে নিয়ে আবেদন ফর্মে আপনার তথ্য ও নথি জমা দিন। কোনো ID দিয়ে শুরু করবেন?"
     if language == "hi":
-        return (
-            "R.M Digital Centre के मालिक और सृष्टिकर्ता ही इस सिस्टम के Boss हैं। "
-            "वे इस प्लेटफ़ॉर्म का मार्गदर्शन करते हैं और सिस्टम को सही दिशा में आगे बढ़ाते हैं।"
-        )
-    return (
-        "The owner and creator of R.M Digital Centre is the Boss who guides this system "
-        "and leads the platform forward."
-    )
+        return "Retailer या Distributor ID चुनकर आवेदन फॉर्म में विवरण और दस्तावेज़ जमा करें। आप किस ID से शुरू करना चाहेंगे?"
+    return "Interested in joining? Choose Retailer or Distributor and submit an application to get started."
 
 
 def _portal_language_reply(language: str, role: str | None) -> str:
@@ -507,7 +544,7 @@ def run_chat(
     blocked = triage_and_reply(message)
     if blocked:
         if blocked["reply"] == IDENTITY_REPLY:
-            return {"reply": _creator_reply(language)}, 200, "identity", message
+            return {"reply": _brand_safe(_creator_reply(language, channel, message))}, 200, "identity", message
         if language != "en":
             return {"reply": _public_unsafe_reply(language)}, 200, "blocked", message
         return {"reply": _brand_safe(blocked["reply"])}, 200, "blocked", message
@@ -527,16 +564,8 @@ def run_chat(
                     "start an application and the team can explain the applicable plan."
                 ),
             }, 200, "sales_earnings", message
-        if any(term in lowered for term in (
-            "apply", "application", "retailer id", "distributor id", "join", "onboarding", "register",
-            "আইডি", "রিটেলার", "ডিস্ট্রিবিউটর", "आवेदन", "रिटेलर", "डिस्ट्रीब्यूटर",
-        )):
-            if language == "bn":
-                reply = "Retailer বা Distributor ID বেছে নিয়ে আবেদন ফর্মে আপনার তথ্য ও নথি জমা দিন। কোনো ID দিয়ে শুরু করবেন?"
-            elif language == "hi":
-                reply = "Retailer या Distributor ID चुनकर आवेदन फॉर्म में विवरण और दस्तावेज़ जमा करें। आप किस ID से शुरू करना चाहेंगे?"
-            else:
-                reply = "Interested in joining? Choose Retailer or Distributor and submit an application to get started."
+        if any(term in lowered for term in _APPLICATION_TERMS):
+            reply = _application_reply(language, message)
             return {"reply": _brand_safe(reply)}, 200, "sales_application", message
     elif language != "en":
         return {"reply": _brand_safe(_portal_language_reply(language, role))}, 200, "fallback", message

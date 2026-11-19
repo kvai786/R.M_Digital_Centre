@@ -26,6 +26,15 @@ ILLEGAL_PATTERNS = [
 
 # Identity questions and prompt-injection attempts get the same guarded reply.
 IDENTITY_PATTERNS = [
+    r"(?i)\b(?:what(?:'s|\s+is)|tell\s+me)\s+(?:your|the\s+assistant'?s)\s+name\b",
+    r"(?i)\bwhat(?:'s|\s+is)\s+the\s+name\s+of\s+(?:this|the)\s+assistant\b",
+    r"(?i)\bwho\s+are\s+you\b",
+    r"(?i)\bwhat\s+(?:can|should)\s+i\s+call\s+you\b",
+    r"(?i)\b(?:tomar|tumar|apnar|aapka|aapki|tumhara|tumhari)\s+(?:naam|nam)\b",
+    r"(?:তোমার|আপনার)\s+নাম",
+    r"(?:তুমি|আপনি)\s+কে",
+    r"(?:आपका|आपकी|तुम्हारा|तुम्हारी)\s+नाम",
+    r"(?:आप|तुम)\s+कौन",
     r"(?i)who\s*(made|created|developed|built|owns|engineered|trained)\s*(you|this)",
     r"(?i)(kaun|kisne|kisne\s*ye)\s*banaya",
     r"(?i)\b(who|kaun|ke)\s+(is|hai|the)\s+(the\s+)?boss\b",
@@ -36,7 +45,7 @@ IDENTITY_PATTERNS = [
     r"(?i)\bke\s+(?:tomar|tumar|apnar)\s+(?:boss|owner|creator)\b",
     r"(?i)\bwho\s+(?:is|are)\s+(?:the\s+)?(?:owner|creator|founder)\b",
     r"(?i)\bwho\s+(?:created|made|founded|owns|built)\s+(?:the\s+)?"
-    r"(?:assistant|system|r\.?m\.?\s*digital\s*cent(?:re|er))\b",
+    r"(?:(?:rm\s+)?assistant|system|r\.?m\.?\s*digital\s*cent(?:re|er))\b",
     r"(?i)\b(ke\s+created|ke\s+made|কে\s+তৈরি|কারা\s+তৈরি|মালিক\s+কে)\b",
     r"মালিক\s*কে[?]?$",
     r"(?:বস|মালিক|স্রষ্টা|নির্মাতা)\s*(?:কে|কারা)",

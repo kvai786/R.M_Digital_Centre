@@ -60,10 +60,10 @@
         const panel = el("div", "rm-chat-panel" + (ownerAssistant ? " rm-supreme-chat-panel" : ""));
         panel.hidden = true;
         panel.setAttribute("role", "dialog");
-        panel.setAttribute("aria-label", "R.M Digital Centre assistant");
+        panel.setAttribute("aria-label", "RM Assistant from R.M Digital Centre");
         const head = el("div", "rm-chat-head");
         const title = el("div");
-        title.append(el("strong", "", "R.M Assistant"), el("small", "", ROLE_LABELS[user.role] || "Signed-in user"));
+        title.append(el("strong", "", "RM Assistant"), el("small", "", ROLE_LABELS[user.role] || "Signed-in user"));
         const close = el("button", "rm-chat-close", "\u00D7");
         close.type = "button";
         close.setAttribute("aria-label", "Close assistant");

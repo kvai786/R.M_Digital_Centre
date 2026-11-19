@@ -2,7 +2,7 @@
 
 /* Floating robot assistant for anonymous homepage visitors. Behaviour is owner-managed on the server. */
 (function () {
-    const WELCOME = "Hi! I'm the R.M. Digital Centre assistant. Ask me about our services or how to apply for a Retailer or Distributor ID.";
+    const WELCOME = "Hi! I'm RM Assistant from R.M Digital Centre. Ask me about our services or how to apply for a Retailer or Distributor ID.";
     const CHIPS = ["Our services", "Apply for Retailer ID", "Apply for Distributor ID", "Documents needed"];
     const ROBOT_SVG = '<svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">' +
         '<line class="rm-bot-antenna" x1="32" y1="7" x2="32" y2="14"/><circle class="rm-bot-bulb" cx="32" cy="5" r="3"/>' +
@@ -59,7 +59,7 @@
         bubble.setAttribute("role", "status");
         const fab = el("button", "rm-bot-fab");
         fab.type = "button";
-        fab.setAttribute("aria-label", "Chat with the R.M. Digital Centre assistant");
+        fab.setAttribute("aria-label", "Chat with RM Assistant from R.M Digital Centre");
         fab.setAttribute("aria-expanded", "false");
         fab.innerHTML = ROBOT_SVG;
         const badge = el("span", "rm-brand-badge", "R.M");
@@ -70,10 +70,10 @@
         const panel = el("div", "rm-chat-panel");
         panel.hidden = true;
         panel.setAttribute("role", "dialog");
-        panel.setAttribute("aria-label", "R.M. Digital Centre assistant");
+        panel.setAttribute("aria-label", "RM Assistant from R.M Digital Centre");
         const head = el("div", "rm-chat-head");
         const title = el("div");
-        title.append(el("strong", "", "R.M. Digital Centre"), el("small", "", "Visitor assistant"));
+        title.append(el("strong", "", "RM Assistant"), el("small", "", "R.M Digital Centre"));
         const close = el("button", "rm-chat-close", "\u00D7");
         close.type = "button";
         close.setAttribute("aria-label", "Close assistant");

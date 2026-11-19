@@ -237,7 +237,7 @@
         const panel = el("div", "chat-panel");
         panel.hidden = true;
         panel.setAttribute("role", "dialog");
-        panel.setAttribute("aria-label", "R.M Digital Centre assistant");
+        panel.setAttribute("aria-label", "RM Assistant from R.M Digital Centre");
         const log = el("div", "chat-log");
         log.setAttribute("aria-live", "polite");
         const form = el("form", "chat-form");
@@ -251,7 +251,7 @@
         send.type = "submit";
         const voiceInput = window.RMVoice ? window.RMVoice.createInput(input) : null;
         form.append(input, send);
-        panel.append(el("div", "chat-head", "R.M Assistant"), log);
+        panel.append(el("div", "chat-head", "RM Assistant"), log);
         if (voiceInput) { panel.append(voiceInput.element); }
         panel.append(form);
         document.body.append(fab, panel);

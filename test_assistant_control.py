@@ -51,7 +51,7 @@ class PublicChatTests(unittest.TestCase):
         for message, expected, expected_outcome in [
             ("hi", "Hi!", "answered"),
             ("What services do you offer?", "AEPS", "answered"),
-            ("Apply for Retailer ID", "Retailer or Distributor", "sales_application"),
+            ("Apply for Retailer ID", "Retailer application", "sales_application"),
             ("How to become a distributor", "referral code", "answered"),
             ("documents needed", "identity proof", "answered"),
         ]:
@@ -104,6 +104,46 @@ class PublicChatTests(unittest.TestCase):
                 body, status, outcome, _ = self.ask(message)
                 self.assertEqual((status, outcome), (200, "identity"))
                 self.assertIn(marker, body["reply"])
+
+    def test_name_and_creator_questions_introduce_rm_assistant(self):
+        cases = (
+            ("what is your name?", "owner and creator"),
+            ("who are you?", "owner and creator"),
+            ("who created RM Assistant?", "owner and creator"),
+            ("তোমার নাম কী?", "মালিক ও স্রষ্টাই"),
+            ("tomar naam ki", "মালিক ও স্রষ্টাই"),
+            ("आपका नाम क्या है?", "मालिक और सृष्टिकर्ता"),
+            ("aapka naam kya hai", "मालिक और सृष्टिकर्ता"),
+        )
+        for message, owner in cases:
+            with self.subTest(message=message):
+                reply, status, outcome, _ = self.ask(message)
+                self.assertEqual((status, outcome), (200, "identity"))
+                self.assertIn("RM Assistant", reply["reply"])
+                self.assertIn("R.M Digital Centre", reply["reply"])
+                self.assertIn(owner, reply["reply"])
+                self.assertIn("Retailer", reply["reply"])
+                self.assertIn("Distributor", reply["reply"])
+
+    def test_identity_and_application_question_respects_selected_role(self):
+        reply, status, outcome, _ = self.ask("What is your name? I want to apply for a Retailer ID.")
+        self.assertEqual((status, outcome), (200, "identity"))
+        self.assertIn("RM Assistant", reply["reply"])
+        self.assertIn("Retailer application", reply["reply"])
+        self.assertNotIn("Distributor", reply["reply"])
+
+    def test_onboarding_guidance_follows_requested_role(self):
+        for message, marker, other in (
+            ("I want to apply for a Retailer ID", "Retailer application", "Distributor"),
+            ("I want to apply for a Distributor ID", "referral code", "Retailer"),
+            ("আমি রিটেলার আইডির আবেদন করতে চাই", "Retailer আবেদন", "Distributor"),
+            ("मुझे डिस्ट्रीब्यूटर आईडी के लिए आवेदन करना है", "Distributor आवेदन", "Retailer"),
+        ):
+            with self.subTest(message=message):
+                reply, status, outcome, _ = self.ask(message)
+                self.assertEqual((status, outcome), (200, "sales_application"))
+                self.assertIn(marker, reply["reply"])
+                self.assertNotIn(other, reply["reply"])
 
     def test_creator_question_does_not_bypass_security(self):
         for message in (
@@ -206,7 +246,7 @@ class PublicChatTests(unittest.TestCase):
 
     def test_application_reply_uses_current_registration_prompt_without_stale_offer(self):
         reply = self.ask("How can I apply for a Retailer ID?")[0]["reply"]
-        self.assertIn("submit an application", reply)
+        self.assertIn("Retailer application", reply)
         self.assertNotIn("December 2026", reply)
         self.assertNotIn("zero joining fee", reply)
         income_reply = self.ask("How much daily income and commission can I earn?")[0]["reply"]
