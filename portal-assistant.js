@@ -29,7 +29,7 @@
     }
 
     async function ask(message) {
-        const response = await fetch("/assistant/chat", {
+        const response = await fetch("/api/chat", {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
@@ -40,7 +40,8 @@
             return "";
         }
         const data = await response.json().catch(function () { return {}; });
-        return typeof data.reply === "string" ? data.reply : "Sorry, I could not respond right now.";
+        return typeof data.reply === "string" ? data.reply :
+            "Please rephrase your question about R.M Digital Centre services.";
     }
 
     async function init() {

@@ -62,20 +62,47 @@ class InputValidationTests(unittest.TestCase):
         body = server.AuthInput(identifier="9000000013", password="p'a;ss--<w>ord", recovery="it's; a -- phrase")
         self.assertIn("'", body.password)
 
-    def test_chat_allows_apostrophes_but_not_markup(self):
+    def test_chat_defers_markup_validation_for_a_polite_reply(self):
         self.assertEqual(server.PublicAssistantRequest(message="What's the AEPS charge -- today?").message[:6], "What's")
-        with self.assertRaises(ValidationError):
-            server.PublicAssistantRequest(message="<script>alert(1)</script>")
+        self.assertEqual(
+            server.PublicAssistantRequest(message="<script>alert(1)</script>").message,
+            "<script>alert(1)</script>",
+        )
 
-    def test_api_returns_readable_422_without_echoing_input(self):
+    def test_api_returns_readable_security_warning_without_echoing_input(self):
         with TestClient(server.app) as client:
             response = client.post(
                 "/api/public/assistant/chat", json={"message": "<script>alert(1)</script>"},
                 headers={"Origin": "http://testserver"},
             )
-        self.assertEqual(response.status_code, 422)
-        self.assertIsInstance(response.json()["detail"], str)
-        self.assertNotIn("script", response.json()["detail"])
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("security", response.json()["reply"].lower())
+        self.assertNotIn("script", response.json()["reply"])
+
+    def test_visitor_assistant_compatibility_route_returns_replies(self):
+        with TestClient(server.app) as client:
+            for message, marker in (
+                ("hi", "Hi!"),
+                ("kimo acho", "নমস্কার!"),
+                ("আমি ID নিতে চাই", "Retailer"),
+            ):
+                with self.subTest(message=message):
+                    response = client.post(
+                        "/api/visitor-assistant", json={"message": message},
+                        headers={"Origin": "http://testserver"},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertIn(marker, response.json()["reply"])
+
+    def test_unified_chat_route_returns_visitor_reply(self):
+        with TestClient(server.app) as client:
+            response = client.post(
+                "/api/chat", json={"message": "kimo acho"},
+                headers={"Origin": "http://testserver"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("নমস্কার!", response.json()["reply"])
+        self.assertNotIn("Sorry, I could not respond right now.", response.json()["reply"])
 
 
 if __name__ == "__main__":

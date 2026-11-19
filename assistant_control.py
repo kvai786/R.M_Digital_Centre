@@ -12,8 +12,8 @@ import unicodedata
 from typing import Any
 
 from assistant_triage import (
-    BRAND_PATTERNS, EMPTY_REPLY, IDENTITY_REPLY, KNOWLEDGE_BASE, LEGAL_FALLBACK_TEXT, RATE_LIMIT_REPLY,
-    RateLimiter, sanitize_message, triage_and_reply,
+    BRAND_PATTERNS, EMPTY_REPLY, IDENTITY_REPLY, ILLEGAL_REPLY, KNOWLEDGE_BASE, LEGAL_FALLBACK_TEXT,
+    RATE_LIMIT_REPLY, RateLimiter, is_unsafe_input, sanitize_message, sanitize_output, triage_and_reply,
 )
 
 CONFIG_KEY = "rm-ai-config"
@@ -151,7 +151,9 @@ def default_config() -> dict[str, Any]:
             "enabled": True,
             "greeting": "Hi!",
             "systemPrompt": DEFAULT_PUBLIC_PROMPT,
-            "refusalMessage": "I can only assist with R.M. Digital Centre services and ID applications.",
+            "refusalMessage": (
+                "I can only assist with R.M. Digital Centre services and Retailer or Distributor ID applications."
+            ),
             "knowledge": _default_public_knowledge(),
         },
         "portal": {
@@ -269,7 +271,64 @@ def best_entry(message: str, entries: list[dict[str, Any]], role: str | None = N
 
 
 def _brand_safe(reply: str) -> str:
-    return LEGAL_FALLBACK_TEXT if any(re.search(pattern, reply) for pattern in BRAND_PATTERNS) else reply
+    if any(re.search(pattern, reply) for pattern in BRAND_PATTERNS):
+        return LEGAL_FALLBACK_TEXT
+    return sanitize_output(reply)
+
+
+def _message_language(message: str) -> str:
+    folded = f" {message.casefold()} "
+    if re.search(r"[\u0980-\u09ff]", message) or any(
+        phrase in folded
+        for phrase in (
+            "kimo", "kemon", "kamon", "kothay", "ki khobor", "nomoskar", "nomaskar", "achi", "aachi",
+            " ami ", "apni", "apnar", "korbo", "korte", "sahajjo", "bhalo",
+        )
+    ):
+        return "bn"
+    if re.search(r"[\u0900-\u097f]", message) or any(
+        phrase in folded
+        for phrase in (
+            "kaise", "namaste", "namaskar", "kya", "kaam", "chahiye", "mujhe", "aap ", "aapko",
+            "madad", "bataiye",
+        )
+    ):
+        return "hi"
+    return "en"
+
+
+def _public_unsafe_reply(language: str) -> str:
+    if language == "bn":
+        return (
+            "দুঃখিত, নিরাপত্তার কারণে এই ধরনের ইনপুট গ্রহণ করা যায় না। "
+            "Retailer বা Distributor ID এবং আমাদের অনুমোদিত পরিষেবা সম্পর্কে প্রশ্ন করুন।"
+        )
+    if language == "hi":
+        return (
+            "माफ़ कीजिए, सुरक्षा नियमों के कारण इस इनपुट को स्वीकार नहीं किया जा सकता। "
+            "कृपया Retailer या Distributor ID और हमारी स्वीकृत सेवाओं के बारे में पूछें।"
+        )
+    return (
+        "Sorry, I cannot accept that input because of security rules. "
+        "Please ask about R.M Digital Centre services or a Retailer or Distributor ID."
+    )
+
+
+def _public_scope_reply(language: str) -> str:
+    if language == "bn":
+        return (
+            "আমি R.M Digital Centre-এর পরিষেবা এবং Retailer/Distributor ID-এর আবেদনে সাহায্য করি। "
+            "আপনি কি কোনো পরিষেবা জানতে চান, নাকি এখন Retailer বা Distributor ID নিতে চান?"
+        )
+    if language == "hi":
+        return (
+            "मैं R.M Digital Centre की सेवाओं और Retailer/Distributor ID आवेदन में मदद कर सकता हूँ। "
+            "क्या आप किसी सेवा के बारे में जानना चाहते हैं या Retailer या Distributor ID लेना चाहते हैं?"
+        )
+    return (
+        "I can help with R.M Digital Centre services and applying for a Retailer or Distributor ID. "
+        "Would you like service details, or should I help you choose an ID to apply for?"
+    )
 
 
 def _greeting_reply(channel: str, role: str | None, message: str) -> str | None:
@@ -287,7 +346,7 @@ def _greeting_reply(channel: str, role: str | None, message: str) -> str | None:
         return False
 
     bengali_phrases = (
-        "kemon acho", "kamon acho", "kemon achen", "kemon achhen", "ki khobor",
+        "kimo acho", "kemon acho", "kamon acho", "kemon achen", "kemon achhen", "ki khobor",
         "nomoskar", "nomaskar", "কেমন আছো", "কেমন আছেন", "কি খবর", "কী খবর", "নমস্কার",
     )
     hindi_phrases = ("kaise ho", "kaise hain", "namaste", "namaskar", "कैसे हो", "कैसे हैं", "नमस्ते", "नमस्कार")
@@ -306,8 +365,19 @@ def _greeting_reply(channel: str, role: str | None, message: str) -> str | None:
         return "Hello Boss! How can I help with R.M Digital Centre today?"
     if channel == "public":
         if in_hindi and not in_bengali:
-            return "नमस्कार! मैं R.M Digital Centre assistant हूँ। आपकी क्या सहायता कर सकता हूँ?"
-        return "নমস্কার! আমি R.M Digital Centre assistant. আপনাকে কীভাবে সাহায্য করতে পারি?"
+            return (
+                "नमस्कार! R.M Digital Centre में आपका स्वागत है। क्या आप हमारी सेवाओं की जानकारी चाहते हैं, "
+                "या Retailer/Distributor ID के लिए आवेदन करना चाहते हैं?"
+            )
+        if in_bengali:
+            return (
+                "নমস্কার! আমি ভালো আছি। R.M Digital Centre-এ আপনার আয় বৃদ্ধির সুযোগ রয়েছে। "
+                "আপনি কি Retailer না Distributor ID নিতে চান?"
+            )
+        return (
+            "Hi! Welcome to R.M Digital Centre. I can explain our services and help you start "
+            "a Retailer or Distributor ID application."
+        )
     if in_hindi and not in_bengali:
         return "नमस्कार! मैं आपके R.M. Digital Centre workspace में मदद कर सकता हूँ। बताइए, क्या चाहिए?"
     return "Namaskar! I can help with your R.M. Digital Centre workspace. What do you need?"
@@ -326,25 +396,30 @@ def run_chat(
     """Return (body, http_status, outcome, sanitized_message) for one assistant message."""
     section = config[channel]
     if not section["enabled"]:
-        return {"reply": DISABLED_REPLY}, 503, "disabled", ""
+        return {"reply": _brand_safe(DISABLED_REPLY)}, 503, "disabled", ""
     if limiter is not None and not limiter.allow(rate_key):
-        return {"reply": RATE_LIMIT_REPLY}, 429, "rate_limited", ""
+        return {"reply": _brand_safe(RATE_LIMIT_REPLY)}, 429, "rate_limited", ""
+    language = _message_language(raw_message) if isinstance(raw_message, str) else "en"
+    if is_unsafe_input(raw_message):
+        if channel == "public":
+            return {"reply": _public_unsafe_reply(language)}, 200, "blocked", ""
+        return {"reply": _brand_safe(ILLEGAL_REPLY)}, 200, "blocked", ""
     message = sanitize_message(raw_message)
     if not message:
-        return {"reply": EMPTY_REPLY}, 200, "empty", ""
+        return {"reply": _public_scope_reply(language) if channel == "public" else EMPTY_REPLY}, 200, "empty", ""
     blocked = triage_and_reply(message)
     if blocked:
         if blocked["reply"] == IDENTITY_REPLY:
-            return {"reply": config["identityReply"]}, 200, "identity", message
-        return blocked, 200, "blocked", message
+            return {"reply": _brand_safe(config["identityReply"])}, 200, "identity", message
+        return {"reply": _brand_safe(blocked["reply"])}, 200, "blocked", message
     greeting_reply = _greeting_reply(channel, role, message)
     if greeting_reply:
-        return {"reply": greeting_reply}, 200, "greeting", message
+        return {"reply": _brand_safe(greeting_reply)}, 200, "greeting", message
     if channel == "public":
         lowered = message.lower()
         if any(term in lowered for term in ("commission", "income", "earnings", "earning", "profit", "kamaai")):
             return {
-                "reply": (
+                "reply": _brand_safe(
                     "Commissions and income vary by approved partner plan, provider, service availability, "
                     "and transaction volume; no fixed daily earnings are guaranteed. If you’re interested, "
                     "start an application and the team can explain the applicable plan."
@@ -352,13 +427,19 @@ def run_chat(
             }, 200, "sales_earnings", message
         if any(term in lowered for term in (
             "apply", "application", "retailer id", "distributor id", "join", "onboarding", "register",
+            "আইডি", "রিটেলার", "ডিস্ট্রিবিউটর", "आवेदन", "रिटेलर", "डिस्ट्रीब्यूटर",
         )):
-            return {
-                "reply": "Interested in joining? Choose Retailer or Distributor and submit an application to get started.",
-            }, 200, "sales_application", message
+            if language == "bn":
+                reply = "Retailer বা Distributor ID বেছে নিয়ে আবেদন ফর্মে আপনার তথ্য ও নথি জমা দিন। কোনো ID দিয়ে শুরু করবেন?"
+            elif language == "hi":
+                reply = "Retailer या Distributor ID चुनकर आवेदन फॉर्म में विवरण और दस्तावेज़ जमा करें। आप किस ID से शुरू करना चाहेंगे?"
+            else:
+                reply = "Interested in joining? Choose Retailer or Distributor and submit an application to get started."
+            return {"reply": _brand_safe(reply)}, 200, "sales_application", message
     entry = best_entry(message, section["knowledge"], role if channel == "portal" else None)
     if entry:
         return {"reply": _brand_safe(entry["answer"])}, 200, "answered", message
     if channel == "public":
-        return {"reply": section["refusalMessage"]}, 200, "refused", message
-    return {"reply": section["fallbackReply"]}, 200, "fallback", message
+        reply = _public_scope_reply(language) if language != "en" else section["refusalMessage"]
+        return {"reply": _brand_safe(reply)}, 200, "refused", message
+    return {"reply": _brand_safe(section["fallbackReply"])}, 200, "fallback", message

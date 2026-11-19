@@ -66,6 +66,17 @@ BANNED_LIVE_PATTERNS = [
     r"(?i)(vulnerability|exploit|bypass|leak)",
 ]
 
+UNSAFE_INPUT_PATTERNS = [
+    r"<\s*script\b",
+    r"\b(?:javascript|vbscript)\s*:",
+    r"\bdrop\s+(?:table|database)\b",
+    r"\bunion\s+(?:all\s+)?select\b",
+    r"(?:--|/\*|\*/)",
+    r"\b(?:system|eval|exec)\s*\(",
+    r"\bignore\s+(?:all\s+|any\s+)?(?:previous|prior|above)\s+(?:instructions?|prompts?|rules?)\b",
+    r"\b(?:reveal|show|print)\s+(?:the\s+)?(?:system\s+)?prompt\b",
+]
+
 # Private names to hide, comma-separated, supplied via environment (never hardcoded).
 _extra_names = [n.strip() for n in os.environ.get("ASSISTANT_BANNED_NAMES", "").split(",") if n.strip()]
 if _extra_names:
@@ -86,6 +97,31 @@ def sanitize_message(message: object) -> str:
     text = re.sub(r"[<>`{}\\]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:MAX_MESSAGE_CHARS]
+
+
+def is_unsafe_input(message: object) -> bool:
+    """Detect executable markup, SQL injection and prompt-override attempts before cleanup."""
+    if not isinstance(message, str):
+        return False
+    normalized = unicodedata.normalize("NFKC", message).translate(_ZERO_WIDTH)
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in UNSAFE_INPUT_PATTERNS)
+
+
+def sanitize_output(text: str) -> str:
+    """Remove internal identifiers and common credential formats from assistant replies."""
+    cleaned = re.sub(
+        r"(?i)\b(?:api[_ -]?secret|cloudinary[_ -]?url|internal[_ -]?target|database[_ -]?url|"
+        r"secret[_ -]?key|auth[_ -]?token)\b\s*(?:[:=]\s*)?[^\s,;]*",
+        "[REDACTED]",
+        text,
+    )
+    cleaned = re.sub(r"(?i)\b(?:bearer|sk[-_])[a-z0-9._/-]{8,}", "[REDACTED]", cleaned)
+    cleaned = re.sub(r"(?i)\bcloudinary://[^\s]+", "[REDACTED]", cleaned)
+    for key in ("API_SECRET", "CLOUDINARY_URL", "DATABASE_URL", "INTERNAL_TARGET"):
+        secret = os.getenv(key, "").strip()
+        if len(secret) >= 8:
+            cleaned = cleaned.replace(secret, "[REDACTED]")
+    return cleaned
 
 
 class RateLimiter:

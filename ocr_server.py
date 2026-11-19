@@ -44,7 +44,7 @@ from assistant_control import (
     CONFIG_KEY as AI_CONFIG_KEY, default_config as default_ai_config, normalize_config as normalize_ai_config,
     redact_for_log, run_chat, safe_config as safe_ai_config,
 )
-from assistant_triage import RateLimiter
+from assistant_triage import RateLimiter, sanitize_output
 from brand_documents import VIEWER_CSP, is_watermarkable, watermark_viewer_html
 import document_storage
 
@@ -3585,7 +3585,8 @@ class AssistantChatRequest(InputModel):
 
 class PublicAssistantRequest(InputModel):
     sql_checks = False
-    message: str = Field(max_length=1000)
+    scan_text = False
+    message: str = Field(default="", max_length=1000)
 
 
 class PublicSpeechInput(InputModel):
@@ -3807,12 +3808,24 @@ def public_assistant_settings(
     }
 
 
+@app.post("/api/chat")
+@app.post("/api/visitor-assistant")
 @app.post("/api/public/assistant/chat")
 def public_assistant_chat(
     payload: PublicAssistantRequest, request: Request, db: Session = Depends(get_db),
 ) -> JSONResponse:
     config = load_ai_settings(db)[0]
     remote = request.client.host if request.client else "unknown"
+    if request.url.path == "/api/chat" and request.cookies.get(COOKIE_NAME):
+        user = current_user(request, db)
+        body, status, outcome, message = run_chat(
+            "portal", payload.message, config, limiter=ASSISTANT_LIMITER, rate_key=str(user.id), role=user.role,
+        )
+        if user.role == "master" and status == 200 and outcome != "greeting":
+            body["reply"] = sanitize_output("Namaskar Sir. " + body["reply"])
+        log_ai_event(db, config, "portal", user.id, user.role, message, body["reply"], outcome)
+        return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
+
     body, status, outcome, message = run_chat(
         "public", payload.message, config, limiter=PUBLIC_ASSISTANT_LIMITER, rate_key=remote,
     )

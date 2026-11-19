@@ -261,9 +261,10 @@
             input.value = "";
             send.disabled = true;
             try {
-                const result = await postJson("/assistant/chat", { message: text });
+                const result = await postJson("/api/chat", { message: text });
                 if (result.status === 401) { window.location.assign("login.html"); return; }
-                addMessage(log, result.data.reply || result.data.detail || "Sorry, I could not respond right now.", "bot");
+                addMessage(log, result.data.reply || result.data.detail ||
+                    "Please rephrase your question about R.M Digital Centre services.", "bot");
             } catch (error) {
                 addMessage(log, "The assistant is unavailable. Please try again.", "bot");
             } finally {

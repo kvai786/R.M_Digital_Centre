@@ -30,7 +30,7 @@
     }
 
     async function ask(message) {
-        const response = await fetch("/api/public/assistant/chat", {
+        const response = await fetch("/api/chat", {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
@@ -38,7 +38,8 @@
         });
         const data = await response.json().catch(function () { return {}; });
         return {
-            reply: typeof data.reply === "string" ? data.reply : "Sorry, I could not respond right now.",
+            reply: typeof data.reply === "string" ? data.reply :
+                "Please ask about our services or a Retailer or Distributor ID.",
             speechToken: data.speechToken,
             speechExpiresAt: data.speechExpiresAt,
         };
