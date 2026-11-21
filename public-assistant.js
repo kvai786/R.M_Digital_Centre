@@ -29,12 +29,12 @@
         }
     }
 
-    async function ask(message) {
+    async function ask(message, previousContext) {
         const response = await fetch("/api/chat", {
             method: "POST",
             credentials: "omit",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: message }),
+            body: JSON.stringify({ message: message, context: previousContext }),
         });
         const data = await response.json();
         if (!response.ok && typeof data.reply !== "string") {
@@ -55,6 +55,7 @@
         if (!settings || !settings.enabled) { return; }
 
         const root = el("div", "rm-bot");
+        const context = [];
         const bubble = el("div", "rm-bot-bubble", settings.greeting || "Hi!");
         bubble.setAttribute("role", "status");
         const fab = el("button", "rm-bot-fab");
@@ -115,10 +116,11 @@
         async function submit(text) {
             if (send.disabled) { return; }
             if (window.RMVoice) { window.RMVoice.noteUserQuery(text); }
+            const previousContext = context.slice(-6);
             addMessage(text, "user");
             send.disabled = true;
             try {
-                const answer = await ask(text);
+                const answer = await ask(text, previousContext);
                 addMessage(answer.reply, "bot", answer);
             } catch (error) {
                 console.error("Visitor assistant request failed.", error);
@@ -129,6 +131,7 @@
                         : "The assistant is unavailable right now. Please try again shortly.";
                 addMessage(unavailable, "bot");
             } finally {
+                context.push(text);
                 send.disabled = false;
                 input.focus();
             }

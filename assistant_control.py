@@ -8,6 +8,7 @@ Supreme Owner edits at runtime; nothing here contacts an external AI provider.
 from __future__ import annotations
 
 import re
+import threading
 import unicodedata
 from typing import Any
 
@@ -355,26 +356,97 @@ _APPLICATION_TERMS = (
     "আইডি", "রিটেলার", "ডিস্ট্রিবিউটর", "आवेदन", "रिटेलर", "डिस्ट्रीब्यूटर", "डिस्ट्रिब्यूटर",
 )
 
+_REPLY_VARIATION_LOCK = threading.Lock()
+_REPLY_VARIATIONS: dict[str, int] = {}
 
-def _creator_reply(language: str, channel: str, message: str) -> str:
+
+def _next_reply_variation(key: str, count: int) -> int:
+    with _REPLY_VARIATION_LOCK:
+        variation = _REPLY_VARIATIONS.get(key, 0)
+        _REPLY_VARIATIONS[key] = (variation + 1) % count
+        if len(_REPLY_VARIATIONS) > 2000:
+            for stale_key in list(_REPLY_VARIATIONS)[:500]:
+                del _REPLY_VARIATIONS[stale_key]
+    return variation
+
+
+def _identity_intent(message: str) -> str:
+    lowered = message.casefold()
+    if any(term in lowered for term in (
+        "model", "llm", "powered", "system", "technology", "tech stack", "copilot", "chatgpt", "gpt",
+        "gemini", "claude", "llama", "মডেল", "সিস্টেম", "मॉडल", "सिस्टम",
+    )):
+        return "system"
+    if any(term in lowered for term in (
+        "how", "built", "developed", "created", "made", "designed", "source code", "code base",
+        "কীভাবে", "তৈরি", "উন্নয়ন", "कैसे", "बनाया", "निर्मित", "विकसित",
+    )):
+        return "build"
+    if any(term in lowered for term in (
+        "manage", "run", "guide", "control", "owner", "boss", "founder", "creator", "developer",
+        "মালিক", "পরিচালনা", "চালায়", "বস", "सृष्टिकर्ता", "मालिक", "बॉस", "निर्माता",
+    )):
+        return "owner"
+    return "name"
+
+
+def _creator_reply(
+    language: str, channel: str, message: str, conversation_key: str = "",
+) -> str:
+    intent = _identity_intent(message)
+    variation = _next_reply_variation(f"{conversation_key}|{language}|{intent}", 3)
     if language == "bn":
-        reply = (
-            "আমি RM Assistant, R.M Digital Centre-এর সহকারী। প্রতিষ্ঠানের মালিক ও স্রষ্টাই আমার Boss; "
-            "তিনি আমাকে তৈরি করেছেন এবং সিস্টেমকে পরিচালনা করেন।"
+        owner = (
+            "আমি RM Assistant—R.M Digital Centre-এর সহকারী। প্রতিষ্ঠানের মালিক ও স্রষ্টাই "
+            "founder/owner হিসেবে আমার কাজের দিকনির্দেশনা দেন; আমি তাঁর নেতৃত্বে তৈরি ও পরিচালিত।"
         )
-        guidance = " আমাদের পরিষেবা বা Retailer/Distributor ID সম্পর্কে জানতে চান?"
+        details = (
+            "কীভাবে নির্মিত হয়েছে, ব্যবহৃত প্রযুক্তি বা অভ্যন্তরীণ model-এর গোপন তথ্য আমি প্রকাশ করি না। "
+            "তবে আমার কাজ পরিষ্কার: নিরাপদে পরিষেবা বোঝানো এবং Retailer/Distributor ID আবেদন করতে সাহায্য করা।",
+            "আমি R.M Digital Centre-এর অনুমোদিত সহকারী, কোম্পানির founder/owner-এর নির্দেশনায় তৈরি। "
+            "অভ্যন্তরীণ প্রযুক্তি বা ব্যক্তিগত creator-এর তথ্য গোপন রাখা হয়—আমি পরিষেবা ও ID আবেদন নিয়ে সাহায্য করি।",
+            "আমার পরিচয় RM Assistant। R.M Digital Centre-এর মালিক ও প্রতিষ্ঠাতার নেতৃত্বে আমাকে গড়ে "
+            "তোলা হয়েছে, আর আমি দর্শককে পরিষেবা ও Retailer/Distributor ID আবেদন নিয়ে পথ দেখাই।",
+        )
+        reply = owner if intent in ("name", "owner") else f"{owner} {details[variation]}"
+        guidance = " R.M Digital Centre-এর কোন পরিষেবা বা Retailer/Distributor ID সম্পর্কে জানতে চান?"
     elif language == "hi":
-        reply = (
-            "मैं R.M Digital Centre का RM Assistant हूँ। इसके मालिक और सृष्टिकर्ता ही मेरे Boss हैं; "
-            "उन्होंने मुझे बनाया है और सिस्टम का मार्गदर्शन करते हैं।"
+        owner = (
+            "मैं RM Assistant हूँ—R.M Digital Centre का सहायक। इसके मालिक और सृष्टिकर्ता founder/owner "
+            "के मार्गदर्शन में मुझे बनाया और संचालित किया गया है।"
         )
-        guidance = " क्या आप हमारी सेवाओं या Retailer/Distributor ID के बारे में जानना चाहेंगे?"
+        details = (
+            "मैं अंदरूनी तकनीक, system या model के गोपनीय विवरण साझा नहीं करता। मेरा काम सुरक्षित रूप से "
+            "सेवाएँ समझाना और Retailer/Distributor ID आवेदन में आपकी मदद करना है।",
+            "मैं R.M Digital Centre का अधिकृत सहायक हूँ, जिसे संस्थान के founder/owner के निर्देश से तैयार "
+            "किया गया है। तकनीकी और व्यक्तिगत creator विवरण गोपनीय रहते हैं।",
+            "RM Assistant के रूप में मुझे R.M Digital Centre के मालिक व संस्थापक के नेतृत्व में बनाया "
+            "गया है, ताकि मैं सेवाओं और Retailer/Distributor ID आवेदन में मदद कर सकूँ।",
+        )
+        reply = owner if intent in ("name", "owner") else f"{owner} {details[variation]}"
+        guidance = " आप हमारी किस सेवा या Retailer/Distributor ID के बारे में जानना चाहेंगे?"
     else:
-        reply = (
-            "I am RM Assistant from R.M Digital Centre. Its owner and creator is the Boss who created me "
-            "and guides the system."
+        owner_variants = (
+            "I’m RM Assistant, the assistant for R.M Digital Centre. Its owner and creator is the "
+            "founder/owner—the Boss—who created and guides me.",
+            "I’m RM Assistant from R.M Digital Centre, built for the business by its owner and creator "
+            "under the founder/owner, known as the Boss, and guided by that leadership.",
+            "You’re speaking with RM Assistant, R.M Digital Centre’s service assistant, created and managed "
+            "by the owner and creator, the Boss, under the founder/owner’s direction.",
         )
-        guidance = " Would you like to explore our services or apply for a Retailer or Distributor ID?"
+        details = (
+            "My internal technology, model details, and private development records stay confidential. "
+            "I’m here to explain approved services and help with Retailer or Distributor ID applications.",
+            "I’m purpose-built around R.M Digital Centre’s approved knowledge and service workflows. "
+            "I don’t disclose private technical or creator records, but I can guide you through services and ID applications.",
+            "R.M Digital Centre’s founder/owner provides the direction, business rules, and approved information. "
+            "Internal implementation and personal creator details remain protected; my role is practical visitor support.",
+        )
+        reply = owner_variants[variation] if intent in ("name", "owner") else f"{owner_variants[variation]} {details[variation]}"
+        guidance = (
+            " What would you like to know about our services, or shall we talk about a "
+            "Retailer or Distributor ID?"
+        )
     if channel != "public":
         return reply
     if any(term in message.casefold() for term in _APPLICATION_TERMS):
@@ -526,10 +598,20 @@ def redact_for_log(message: str) -> str:
 def run_chat(
     channel: str, raw_message: object, config: dict[str, Any], *,
     limiter: RateLimiter | None = None, rate_key: str = "", role: str | None = None,
+    context: list[str] | None = None,
 ) -> tuple[dict[str, str], int, str, str]:
     """Return (body, http_status, outcome, sanitized_message) for one assistant message."""
     section = config[channel]
+    recent_context = [
+        sanitize_message(item) for item in (context or []) if isinstance(item, str) and sanitize_message(item)
+    ][-6:]
     language = _message_language(raw_message) if isinstance(raw_message, str) else "en"
+    if language == "en" and isinstance(raw_message, str) and len(raw_message.split()) <= 4:
+        for previous in reversed(recent_context):
+            previous_language = _message_language(previous)
+            if previous_language != "en":
+                language = previous_language
+                break
     if not section["enabled"]:
         return {"reply": _brand_safe(_unavailable_reply(language, rate_limited=False))}, 503, "disabled", ""
     if limiter is not None and not limiter.allow(rate_key):
@@ -542,9 +624,24 @@ def run_chat(
     if not message:
         return {"reply": _public_scope_reply(language) if channel == "public" else EMPTY_REPLY}, 200, "empty", ""
     blocked = triage_and_reply(message)
+    if not blocked and recent_context:
+        followup_terms = (
+            "tell me more", "more details", "how", "why", "which one", "and you", "আরও বলুন",
+            "আরও জানি", "আর একটু বল", "और बताइए", "और कैसे", "कैसे",
+        )
+        if any(term in message.casefold() for term in followup_terms):
+            prior_identity = any(
+                triage_and_reply(previous) and triage_and_reply(previous)["reply"] == IDENTITY_REPLY
+                for previous in recent_context[-2:]
+            )
+            if prior_identity:
+                blocked = {"reply": IDENTITY_REPLY}
     if blocked:
         if blocked["reply"] == IDENTITY_REPLY:
-            return {"reply": _brand_safe(_creator_reply(language, channel, message))}, 200, "identity", message
+            identity_message = " ".join([*recent_context[-1:], message])
+            return {
+                "reply": _brand_safe(_creator_reply(language, channel, identity_message, rate_key)),
+            }, 200, "identity", message
         if language != "en":
             return {"reply": _public_unsafe_reply(language)}, 200, "blocked", message
         return {"reply": _brand_safe(blocked["reply"])}, 200, "blocked", message

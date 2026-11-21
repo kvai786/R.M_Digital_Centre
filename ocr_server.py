@@ -3585,12 +3585,14 @@ def dashboard_page() -> FileResponse:
 class AssistantChatRequest(InputModel):
     sql_checks = False  # Natural-language questions may contain apostrophes and dashes.
     message: str = Field(max_length=2000)
+    context: list[str] = Field(default_factory=list, max_length=8)
 
 
 class PublicAssistantRequest(InputModel):
     sql_checks = False
     scan_text = False
     message: str = Field(default="", max_length=1000)
+    context: list[str] = Field(default_factory=list, max_length=8)
 
 
 class PublicSpeechInput(InputModel):
@@ -3893,6 +3895,7 @@ def public_assistant_chat(
         user = current_user(request, db)
         body, status, outcome, message = run_chat(
             "portal", payload.message, config, limiter=ASSISTANT_LIMITER, rate_key=str(user.id), role=user.role,
+            context=payload.context,
         )
         if user.role == "master" and status == 200 and outcome != "greeting":
             if re.search(r"[\u0980-\u09FF]", body["reply"]):
@@ -3907,6 +3910,7 @@ def public_assistant_chat(
 
     body, status, outcome, message = run_chat(
         "public", payload.message, config, limiter=PUBLIC_ASSISTANT_LIMITER, rate_key=remote,
+        context=payload.context,
     )
     if outcome == "sales_application" and growth_campaign_is_active(load_growth_campaign(db)):
         if re.search(r"[\u0980-\u09FF]", body["reply"]):
@@ -4002,6 +4006,7 @@ def assistant_chat(
     config = load_ai_settings(db)[0]
     body, status, outcome, message = run_chat(
         "portal", payload.message, config, limiter=ASSISTANT_LIMITER, rate_key=str(user.id), role=user.role,
+        context=payload.context,
     )
     if user.role == "master" and status == 200 and outcome != "greeting":
         body["reply"] = "Namaskar Sir. " + body["reply"]

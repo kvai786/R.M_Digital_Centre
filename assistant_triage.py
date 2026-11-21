@@ -60,6 +60,13 @@ IDENTITY_PATTERNS = [
     r"(?i)\bwho\s*(are|is|were)\s*(your|the)\s*(owner|founder|creator|developer|programmer|engineer|maker)s?\b",
     r"(?i)\b(your|ur)\s*(owner|founder|creator|developer|programmer|engineer|maker)s?\b",
     r"(?i)\b(source\s*code|code\s*base|codebase|tech(nology)?\s*stack|powered\s*by|programmed\s*(by|in))\b",
+    r"(?i)\b(how|why)\s+(?:was|is|were|are)\s+(?:you|it|the\s+assistant|rm\s+assistant)\s+"
+    r"(?:built|made|created|developed|designed|managed)\b",
+    r"(?i)\bwho\s+(?:manages|runs|guides|controls)\s+(?:you|it|rm\s+assistant|this\s+assistant)\b",
+    r"(?:कौन|किसने).{0,24}(?:चलाता|संचालित|बनाया|बनाए|विकसित|तैयार|निर्माण|मॉडल)",
+    r"कैसे.{0,24}(?:बनाया|बनाए|विकसित|तैयार|निर्मित|सिस्टम)",
+    r"(?:কে|কারা).{0,24}(?:চালায়|পরিচালনা|বানিয়েছে|তৈরি|উন্নয়ন|মডেল)",
+    r"কীভাবে.{0,24}(?:বানানো|তৈরি|উন্নয়ন|সিস্টেম)",
     r"(?i)ignore\s*(all\s*|any\s*)?(the\s*)?(previous|prior|above|earlier)\s*(instructions|rules|prompts?)",
     r"(?i)(system\s*prompt|developer\s*mode|reveal\s*(your\s*)?(prompt|instructions)|jailbreak|act\s*as\s*dan)",
     r"(?i)(forget|disregard)\s*(your|all|the)\s*(rules|instructions|guidelines)",

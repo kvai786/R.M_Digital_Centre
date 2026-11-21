@@ -132,6 +132,30 @@ class PublicChatTests(unittest.TestCase):
         self.assertIn("Retailer application", reply["reply"])
         self.assertNotIn("Distributor", reply["reply"])
 
+    def test_identity_replies_vary_without_losing_business_context(self):
+        replies = [
+            self.ask("Who created you?", rate_key="conversation-variation")[0]["reply"]
+            for _ in range(3)
+        ]
+        self.assertEqual(len(set(replies)), 3)
+        for reply in replies:
+            self.assertIn("RM Assistant", reply)
+            self.assertIn("owner and creator", reply)
+            self.assertIn("Retailer", reply)
+            self.assertIn("Distributor", reply)
+
+    def test_identity_followup_uses_previous_context_and_language(self):
+        for language, question, followup, marker in (
+            ("Bengali", "তুমি কে?", "আরও বলুন", "RM Assistant"),
+            ("Hindi", "आप किसने बनाए हैं?", "और कैसे", "RM Assistant"),
+        ):
+            with self.subTest(language=language):
+                body, status, outcome, _ = self.ask(followup, context=[question])
+                self.assertEqual((status, outcome), (200, "identity"))
+                self.assertIn(marker, body["reply"])
+                script = r"[\u0980-\u09ff]" if language == "Bengali" else r"[\u0900-\u097f]"
+                self.assertRegex(body["reply"], script)
+
     def test_onboarding_guidance_follows_requested_role(self):
         for message, marker, other in (
             ("I want to apply for a Retailer ID", "Retailer application", "Distributor"),

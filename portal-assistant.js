@@ -28,12 +28,12 @@
         }
     }
 
-    async function ask(message) {
+    async function ask(message, previousContext) {
         const response = await fetch("/api/chat", {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
-            body: JSON.stringify({ message: message }),
+            body: JSON.stringify({ message: message, context: previousContext }),
         });
         if (response.status === 401) {
             window.location.assign("/login.html");
@@ -49,6 +49,7 @@
         if (!user) { return; }
 
         const ownerAssistant = user.role === "master";
+        const context = [];
         const root = el("div", "rm-bot rm-portal-root");
         const fab = el("button", "rm-portal-fab" + (ownerAssistant ? " rm-supreme-fab" : ""), "\uD83D\uDCAC");
         fab.type = "button";
@@ -116,17 +117,19 @@
             event.preventDefault();
             const text = input.value.trim();
             if (!text) { return; }
+            const previousContext = context.slice(-6);
             if (voiceInput) { voiceInput.cancel(); }
             if (window.RMVoice) { window.RMVoice.noteUserQuery(text); }
             addMessage(text, "user");
             input.value = "";
             send.disabled = true;
             try {
-                const reply = await ask(text);
+                const reply = await ask(text, previousContext);
                 if (reply) { addMessage(reply, "bot"); }
             } catch (error) {
                 addMessage("The assistant is unavailable. Please try again.", "bot");
             } finally {
+                context.push(text);
                 send.disabled = false;
                 input.focus();
             }
